@@ -500,16 +500,16 @@ const MobileHomeHeader = ({
   isSyncingQueuedChanges: boolean;
   onSyncQueuedChanges: () => void;
 }) => (
-  <div className="mb-3 flex h-10 items-center justify-between lg:hidden">
-    <div className="flex items-center gap-2">
-      <span className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-600 font-semibold text-white">
+  <div className="mb-2 flex h-7 items-center justify-between lg:hidden">
+    <div className="flex items-center gap-1.5">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-xs font-semibold text-white">
         {user?.username?.[0]?.toUpperCase() ?? "E"}
       </span>
-      <span className="text-base font-semibold text-slate-900">EdgeEver</span>
+      <span className="text-sm font-semibold text-slate-900">EdgeEver</span>
     </div>
     <div className="flex items-center gap-1">
       <button
-        className="flex h-9 w-9 items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
+        className="flex h-7 w-7 items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:opacity-50"
         type="button"
         title="立即同步"
         disabled={!isOnline || isSyncingQueuedChanges}
@@ -517,7 +517,7 @@ const MobileHomeHeader = ({
       >
         <RefreshCw className={cn("h-4 w-4", isSyncingQueuedChanges && "animate-spin")} />
       </button>
-      <GitHubRepositoryLink className="flex h-9 w-9 justify-center rounded-full text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70" />
+      <GitHubRepositoryLink className="flex h-7 w-7 justify-center rounded-full text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70" iconClassName="h-4 w-4" />
     </div>
   </div>
 );
@@ -1074,7 +1074,7 @@ export const MemoListPane = ({
       tabIndex={0}
       onKeyDown={handleListKeyDown}
     >
-      <header className="border-b border-slate-200 bg-emerald-50 px-4 pb-3 pt-[max(0.75rem,env(safe-area-inset-bottom))] lg:bg-white lg:py-3 lg:pt-3">
+      <header className="border-b border-slate-200 bg-emerald-50 px-4 pb-2 pt-[max(0.375rem,env(safe-area-inset-bottom))] lg:bg-white lg:py-3 lg:pt-3">
         {selectionMode ? (
           <div className="mb-3 flex h-10 min-w-0 items-center gap-3 lg:hidden">
             <button
