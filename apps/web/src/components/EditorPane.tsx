@@ -1,6 +1,5 @@
 import { useRef, useState, useEffect, useCallback, useMemo, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { useQueryClient, useMutation } from "@tanstack/react-query";
-import { useTranslation } from "react-i18next";
 import { NodeViewWrapper, ReactNodeViewRenderer, useEditor, EditorContent, type Editor, type NodeViewProps } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Image from "@tiptap/extension-image";
@@ -58,6 +57,7 @@ import { localDb, type MemoUpdateSyncPayload } from "@/lib/local-db";
 import { getMemoUpdateQueueId, queueMemoUpdate, shouldQueueMemoSaveError } from "@/lib/sync-queue";
 import {
   getNotebookMoveOptions,
+  DEFAULT_MEMO_TITLE,
 } from "@/lib/app-helpers";
 
 const SUPPORTED_PASTE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"]);
@@ -150,7 +150,6 @@ const parseImageWidth = (value: unknown) => {
 };
 
 const ResizableImageNodeView = ({ editor, node, selected, updateAttributes }: NodeViewProps) => {
-  const { t } = useTranslation();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const width = parseImageWidth(node.attrs.width) ?? DEFAULT_IMAGE_WIDTH_PERCENT;
   const editable = editor.isEditable;
@@ -216,14 +215,14 @@ const ResizableImageNodeView = ({ editor, node, selected, updateAttributes }: No
       <img src={src} alt={alt} title={title || undefined} draggable={false} />
       {editable && selected && (
         <div className="edgeever-image-controls" contentEditable={false}>
-          <div className="edgeever-image-presets" aria-label={t("editor.imageScale")}>
+          <div className="edgeever-image-presets" aria-label="图片缩放">
             {IMAGE_WIDTH_PRESETS.map((preset) => (
               <button
                 key={preset}
                 type="button"
                 className={cn("edgeever-image-preset", width === preset && "is-active")}
-                title={t("editor.scaleTo", { percent: preset })}
-                aria-label={t("editor.scaleTo", { percent: preset })}
+                title={`缩放到 ${preset}%`}
+                aria-label={`缩放到 ${preset}%`}
                 onClick={() => updateWidth(preset)}
               >
                 {preset}
@@ -233,8 +232,8 @@ const ResizableImageNodeView = ({ editor, node, selected, updateAttributes }: No
           <button
             type="button"
             className="edgeever-image-resize-handle"
-            title={t("editor.resizeImage")}
-            aria-label={t("editor.resizeImage")}
+            title="拖拽调整图片宽度"
+            aria-label="拖拽调整图片宽度"
             onPointerDown={startResize}
           />
         </div>
@@ -300,7 +299,6 @@ const MobileNotebookSelectSheet = ({
   onClose: () => void;
   onSelect: (notebookId: string) => void;
 }) => {
-  const { t } = useTranslation();
   const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -317,16 +315,16 @@ const MobileNotebookSelectSheet = ({
       <DrawerContent className="inset-x-0 max-h-[62dvh] overflow-hidden border-x-0 border-b-0 pb-[env(safe-area-inset-bottom)] lg:hidden">
         <header className="flex h-12 items-center justify-between border-b border-slate-200 px-4">
           <DrawerHeader className="min-w-0 p-0">
-            <DrawerTitle className="text-base">{t("editor.currentNotebook")}</DrawerTitle>
+            <DrawerTitle className="text-base">所在笔记本</DrawerTitle>
           </DrawerHeader>
-          <Button size="icon" variant="ghost" title={t("editor.close")} aria-label={t("editor.close")} onClick={onClose}>
+          <Button size="icon" variant="ghost" title="关闭" aria-label="关闭" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </header>
         <Command className="min-h-0 flex-1">
-          <CommandInput placeholder={t("editor.searchNotebook")} />
+          <CommandInput placeholder="搜索笔记本" />
           <CommandList ref={listRef} className="max-h-[calc(62dvh-6.25rem-env(safe-area-inset-bottom))] p-2">
-            <CommandEmpty>{t("editor.noNotebookFound")}</CommandEmpty>
+            <CommandEmpty>没有找到笔记本</CommandEmpty>
             <CommandGroup>
               {options.map((option) => {
                 const selected = option.id === selectedNotebookId;
@@ -341,7 +339,7 @@ const MobileNotebookSelectSheet = ({
                     value={option.id}
                     keywords={[option.name, option.selectLabel, option.slug ?? ""]}
                     data-mobile-notebook-select-id={option.id}
-                    aria-label={selected ? t("editor.currentNotebookAria", { name: option.name }) : t("editor.switchToNotebook", { name: option.name })}
+                    aria-label={selected ? `当前所在笔记本：${option.name}` : `切换到 ${option.name}`}
                     aria-current={selected ? "page" : undefined}
                     disabled={isUpdating}
                     onSelect={() => onSelect(option.id)}
@@ -361,8 +359,8 @@ const MobileNotebookSelectSheet = ({
 export const EditorPane = ({
   memo,
   mobileDefaultEditMemoId,
-  preserveUnsavedContentFromMemoId,
-  saveBlocked = false,
+  preserveUnsavedContentFromMemoId: _preserveUnsavedContentFromMemoId,
+  saveBlocked: _saveBlocked = false,
   isTrashView,
   notebooks,
   isLoading,
@@ -403,7 +401,6 @@ export const EditorPane = ({
   replaceFocusToken: number;
   selectionActionBar?: ReactNode;
 }) => {
-  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const isSelectionMode = Boolean(selectionActionBar);
   const [title, setTitle] = useState("");
@@ -439,12 +436,6 @@ export const EditorPane = ({
   const hasUnsavedChangesRef = useRef(false);
   const editingMemoIdRef = useRef<string | null>(memo?.id ?? null);
   const imageCompressionEnabledRef = useRef(imageCompressionEnabled);
-  const draftPersistTimerRef = useRef<number | null>(null);
-  const pendingBackAfterSaveRef = useRef(false);
-  const toolbarRefreshFrameRef = useRef<number | null>(null);
-  const draftTitleRef = useRef("");
-  const draftTagsTextRef = useRef("");
-  const saveStateRef = useRef<"idle" | "saving" | "saved" | "queued" | "error" | "conflict">("idle");
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_EDITOR_QUERY);
@@ -502,7 +493,7 @@ export const EditorPane = ({
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
 
-    if (saveBlocked || !currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
+    if (!currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
       return;
     }
 
@@ -545,13 +536,13 @@ export const EditorPane = ({
         window.setTimeout(() => setImageUploadState("idle"), 2200);
       }
     })();
-  }, [queryClient, saveBlocked, t]);
+  }, [queryClient]);
 
   const insertResourceFiles = useCallback((files: File[]) => {
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
 
-    if (saveBlocked || !currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
+    if (!currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
       return;
     }
 
@@ -594,7 +585,7 @@ export const EditorPane = ({
               .focus()
               .insertContent({
                 type: "paragraph",
-                content: [{ type: "text", text: t("editor.attachmentInsertText", { filename: resource.filename || file.name, url: resource.url }) }],
+                content: [{ type: "text", text: `附件：${resource.filename || file.name} ${resource.url}` }],
               })
               .run();
           }
@@ -606,7 +597,7 @@ export const EditorPane = ({
         window.setTimeout(() => setImageUploadState("idle"), 2200);
       }
     })();
-  }, [queryClient, saveBlocked, t]);
+  }, [queryClient]);
 
   const editor = useEditor({
     extensions: [
@@ -616,7 +607,7 @@ export const EditorPane = ({
         inline: false,
       }),
       Placeholder.configure({
-        placeholder: t("editor.placeholder"),
+        placeholder: "开始记录...",
       }),
     ],
     content: memo?.contentJson ?? { type: "doc", content: [{ type: "paragraph" }] },
@@ -653,10 +644,6 @@ export const EditorPane = ({
   useEffect(() => {
     imageCompressionEnabledRef.current = imageCompressionEnabled;
   }, [imageCompressionEnabled]);
-
-  useEffect(() => {
-    saveStateRef.current = saveState;
-  }, [saveState]);
 
   useEffect(() => {
     editorRef.current = editor;
@@ -777,32 +764,15 @@ export const EditorPane = ({
       return;
     }
 
-    const refreshToolbar = () => {
-      if (isMobileViewport && !mobileToolbarOpen) {
-        return;
-      }
-
-      if (toolbarRefreshFrameRef.current !== null) {
-        return;
-      }
-
-      toolbarRefreshFrameRef.current = window.requestAnimationFrame(() => {
-        toolbarRefreshFrameRef.current = null;
-        setEditorStateVersion((version) => version + 1);
-      });
-    };
+    const refreshToolbar = () => setEditorStateVersion((version) => version + 1);
     editor.on("selectionUpdate", refreshToolbar);
     editor.on("transaction", refreshToolbar);
 
     return () => {
       editor.off("selectionUpdate", refreshToolbar);
       editor.off("transaction", refreshToolbar);
-      if (toolbarRefreshFrameRef.current !== null) {
-        window.cancelAnimationFrame(toolbarRefreshFrameRef.current);
-        toolbarRefreshFrameRef.current = null;
-      }
     };
-  }, [editor, isMobileViewport, mobileToolbarOpen]);
+  }, [editor]);
 
   const persistCurrentDraft = useCallback(
     (nextTitle = title, nextTagsText = tagsText) => {
@@ -813,34 +783,13 @@ export const EditorPane = ({
         return;
       }
 
-      draftTitleRef.current = nextTitle;
-      draftTagsTextRef.current = nextTagsText;
-
-      const writeDraft = () => {
-        const latestMemo = memoRef.current;
-        const latestEditor = editorRef.current;
-
-        if (!latestMemo || latestMemo.isDeleted || !isEditorReady(latestEditor)) {
-          return;
-        }
-
-        void localDb.drafts.put({
-          memoId: latestMemo.id,
-          title: draftTitleRef.current,
-          tagsText: draftTagsTextRef.current,
-          contentJson: latestEditor.getJSON() as TiptapDoc,
-          updatedAt: new Date().toISOString(),
-        });
-      };
-
-      if (draftPersistTimerRef.current !== null) {
-        return;
-      }
-
-      draftPersistTimerRef.current = window.setTimeout(() => {
-        draftPersistTimerRef.current = null;
-        writeDraft();
-      }, 1500);
+      void localDb.drafts.put({
+        memoId: currentMemo.id,
+        title: nextTitle,
+        tagsText: nextTagsText,
+        contentJson: currentEditor.getJSON() as TiptapDoc,
+        updatedAt: new Date().toISOString(),
+      });
     },
     [tagsText, title]
   );
@@ -851,20 +800,11 @@ export const EditorPane = ({
       return;
     }
 
-    if (!hasUnsavedChangesRef.current) {
-      hasUnsavedChangesRef.current = true;
-      setHasUnsavedChanges(true);
-    }
-
-    if (noteSearchOpen && noteSearchQuery.trim()) {
-      setDirtyVersion((version) => version + 1);
-    }
-
-    if (saveStateRef.current !== "idle") {
-      saveStateRef.current = "idle";
-      setSaveState("idle");
-    }
-  }, [noteSearchOpen, noteSearchQuery]);
+    hasUnsavedChangesRef.current = true;
+    setHasUnsavedChanges(true);
+    setDirtyVersion((version) => version + 1);
+    setSaveState((current) => (current === "conflict" ? current : "idle"));
+  }, []);
 
   const currentSnapshot = useCallback(() => {
     const currentEditor = editorRef.current;
@@ -898,21 +838,7 @@ export const EditorPane = ({
     }
 
     const sameMemo = editingMemoIdRef.current === memo.id;
-    const shouldPreserveUnsavedContent =
-      Boolean(preserveUnsavedContentFromMemoId) &&
-      editingMemoIdRef.current === preserveUnsavedContentFromMemoId &&
-      memo.id !== preserveUnsavedContentFromMemoId &&
-      hasUnsavedChangesRef.current &&
-      !memo.isDeleted;
-
     memoRef.current = memo;
-
-    if (shouldPreserveUnsavedContent) {
-      editingMemoIdRef.current = memo.id;
-      setSaveState("idle");
-      void localDb.drafts.delete(preserveUnsavedContentFromMemoId as string);
-      return;
-    }
 
     if (sameMemo && hasUnsavedChangesRef.current && !memo.isDeleted) {
       return;
@@ -958,7 +884,7 @@ export const EditorPane = ({
     return () => {
       cancelled = true;
     };
-  }, [isTrashView, memo, editor, preserveUnsavedContentFromMemoId]);
+  }, [isTrashView, memo, editor]);
 
   useEffect(() => {
     if (isEditorReady(editor)) {
@@ -985,15 +911,6 @@ export const EditorPane = ({
     };
   }, [editor, markDirty, memo, persistCurrentDraft]);
 
-  useEffect(() => {
-    return () => {
-      if (draftPersistTimerRef.current !== null) {
-        window.clearTimeout(draftPersistTimerRef.current);
-        draftPersistTimerRef.current = null;
-      }
-    };
-  }, []);
-
   const saveMutation = useMutation({
     mutationFn: async () => {
       const currentMemo = memoRef.current;
@@ -1001,10 +918,6 @@ export const EditorPane = ({
 
       if (!currentMemo || !isEditorReady(currentEditor)) {
         throw new Error("No memo selected");
-      }
-
-      if (saveBlocked) {
-        throw new Error("Memo is not ready to save");
       }
 
       if (currentMemo.isDeleted) {
@@ -1039,11 +952,7 @@ export const EditorPane = ({
 
       return { memo: data.memo, snapshot };
     },
-    onMutate: () => {
-      if (!saveBlocked) {
-        setSaveState("saving");
-      }
-    },
+    onMutate: () => setSaveState("saving"),
     onSuccess: async ({ memo: savedMemo, snapshot }) => {
       memoRef.current = savedMemo;
       await onSaved(savedMemo);
@@ -1100,7 +1009,6 @@ export const EditorPane = ({
       memo.isDeleted ||
       !editor ||
       !hasUnsavedChanges ||
-      saveBlocked ||
       saveMutation.isPending ||
       saveState === "conflict"
     ) {
@@ -1112,33 +1020,7 @@ export const EditorPane = ({
     }, 1200);
 
     return () => window.clearTimeout(timer);
-  }, [dirtyVersion, editor, hasUnsavedChanges, memo, saveBlocked, saveMutation, saveState]);
-
-  useEffect(() => {
-    if (
-      !pendingBackAfterSaveRef.current ||
-      saveBlocked ||
-      !memo ||
-      memo.isDeleted ||
-      !editor ||
-      !hasUnsavedChanges ||
-      saveMutation.isPending ||
-      saveState === "conflict"
-    ) {
-      return;
-    }
-
-    pendingBackAfterSaveRef.current = false;
-    saveMutation.mutate(undefined, {
-      onSuccess: () => onBackToList(),
-      onError: (error) => {
-        const sourceError = error instanceof MemoSaveRequestError ? error.originalError : error;
-        if (error instanceof MemoSaveRequestError && shouldQueueMemoSaveError(sourceError)) {
-          onBackToList();
-        }
-      },
-    });
-  }, [editor, hasUnsavedChanges, memo, onBackToList, saveBlocked, saveMutation, saveState]);
+  }, [dirtyVersion, editor, hasUnsavedChanges, memo, saveMutation, saveState]);
 
   if (isSelectionMode) {
     return (
@@ -1152,7 +1034,7 @@ export const EditorPane = ({
     return (
       <div className="flex h-full min-w-0 flex-col bg-white">
         {selectionActionBar}
-        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">{t("editor.loading")}</div>
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-slate-500">加载中</div>
       </div>
     );
   }
@@ -1164,7 +1046,7 @@ export const EditorPane = ({
         <div className="flex min-h-0 flex-1 items-center justify-center px-8 text-center">
           <div>
             <Sparkles className="mx-auto mb-3 h-8 w-8 text-slate-300 animate-pulse" />
-            <div className="text-sm font-medium text-slate-400">{t("editor.emptySelection")}</div>
+            <div className="text-sm font-medium text-slate-400">选择或新建一条笔记</div>
           </div>
         </div>
       </div>
@@ -1173,18 +1055,18 @@ export const EditorPane = ({
 
   const saveLabel =
     saveState === "saving"
-      ? t("editor.saveState.saving")
+      ? "保存中"
       : saveState === "saved"
-        ? t("editor.saveState.saved")
+        ? "已保存"
         : saveState === "queued"
-          ? t("editor.saveState.queued")
+          ? "待同步"
           : saveState === "conflict"
-            ? t("editor.saveState.conflict")
+            ? "有冲突"
             : saveState === "error"
-              ? t("editor.saveState.error")
+              ? "保存失败"
               : hasUnsavedChanges
-                ? t("editor.saveState.unsaved")
-                : t("editor.saveState.saved");
+                ? "未保存"
+                : "已保存";
 
   const saveStateClassName =
     saveState === "error" || saveState === "conflict"
@@ -1197,11 +1079,11 @@ export const EditorPane = ({
 
   const imageUploadLabel =
     imageUploadState === "error"
-      ? t("editor.uploadState.failed")
+      ? "上传失败"
       : imageUploadState === "compressing"
-        ? t("editor.uploadState.compressing")
+        ? "压缩中"
         : imageUploadState === "uploading"
-          ? t("editor.uploadState.uploading")
+          ? "上传中"
           : null;
 
   const mobileStatusLabel = imageUploadLabel ?? saveLabel;
@@ -1213,7 +1095,7 @@ export const EditorPane = ({
         : saveStateClassName;
 
   const updatedLabel = formatDateTime(memo.updatedAt);
-  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? t("editor.notebookFallback");
+  const currentNotebookLabel = notebookOptions.find((notebook) => notebook.id === memo.notebookId)?.name ?? "笔记本";
 
   const mobileDoneDisabled =
     saveMutation.isPending ||
@@ -1225,7 +1107,7 @@ export const EditorPane = ({
     : "0/0";
 
   const updateMemoNotebook = (notebookId: string, sourceMemo: MemoDetail = memoRef.current ?? memo) => {
-    if (saveBlocked || effectiveReadOnly || notebookId === sourceMemo.notebookId || notebookUpdatePending) {
+    if (effectiveReadOnly || notebookId === sourceMemo.notebookId || notebookUpdatePending) {
       setMobileNotebookSheetOpen(false);
       return;
     }
@@ -1252,7 +1134,7 @@ export const EditorPane = ({
   };
 
   const handleNotebookChange = (notebookId: string) => {
-    if (saveBlocked || !hasUnsavedChanges || saveMutation.isPending) {
+    if (!hasUnsavedChanges || saveMutation.isPending) {
       updateMemoNotebook(notebookId);
       return;
     }
@@ -1263,15 +1145,7 @@ export const EditorPane = ({
   };
 
   const handleMobileBack = () => {
-    if (saveBlocked && editor && hasUnsavedChanges) {
-      pendingBackAfterSaveRef.current = true;
-      setSaveState("saving");
-      setIsMobileEditing(false);
-      setMobileToolbarOpen(false);
-      return;
-    }
-
-    if (readOnly || saveBlocked || !editor || !hasUnsavedChanges) {
+    if (readOnly || !editor || !hasUnsavedChanges) {
       onBackToList();
       return;
     }
@@ -1288,7 +1162,7 @@ export const EditorPane = ({
   };
 
   const handleMobileDone = () => {
-    if (readOnly || saveBlocked || !editor || !hasUnsavedChanges) {
+    if (readOnly || !editor || !hasUnsavedChanges) {
       setIsMobileEditing(false);
       setMobileToolbarOpen(false);
       return;
@@ -1319,8 +1193,8 @@ export const EditorPane = ({
               className="lg:hidden"
               size="icon"
               variant="ghost"
-              title={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
-              aria-label={hasUnsavedChanges && !readOnly ? t("editor.saveAndBack") : t("editor.backToList")}
+              title={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
+              aria-label={hasUnsavedChanges && !readOnly ? "保存并返回列表" : "返回列表"}
               disabled={mobileDoneDisabled}
               onClick={handleMobileBack}
             >
@@ -1330,8 +1204,8 @@ export const EditorPane = ({
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30"
                 type="button"
-                title={t("editor.previousMemo")}
-                aria-label={t("editor.previousMemo")}
+                title="上一条笔记"
+                aria-label="上一条笔记"
                 disabled={!hasPreviousMemo}
                 onClick={onOpenPreviousMemo}
               >
@@ -1340,8 +1214,8 @@ export const EditorPane = ({
               <button
                 className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 disabled:opacity-30"
                 type="button"
-                title={t("editor.nextMemo")}
-                aria-label={t("editor.nextMemo")}
+                title="下一条笔记"
+                aria-label="下一条笔记"
                 disabled={!hasNextMemo}
                 onClick={onOpenNextMemo}
               >
@@ -1349,15 +1223,15 @@ export const EditorPane = ({
               </button>
             </div>
             <div className="hidden items-center gap-1 lg:flex">
-              <Button size="icon" variant="ghost" title={t("editor.previousMemo")} aria-label={t("editor.previousMemo")} onClick={onOpenPreviousMemo} disabled={!hasPreviousMemo}>
+              <Button size="icon" variant="ghost" title="上一条笔记" aria-label="上一条笔记" onClick={onOpenPreviousMemo} disabled={!hasPreviousMemo}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <Button size="icon" variant="ghost" title={t("editor.nextMemo")} aria-label={t("editor.nextMemo")} onClick={onOpenNextMemo} disabled={!hasNextMemo}>
+              <Button size="icon" variant="ghost" title="下一条笔记" aria-label="下一条笔记" onClick={onOpenNextMemo} disabled={!hasNextMemo}>
                 <ChevronRight className="h-4 w-4" />
               </Button>
             </div>
             <span className="hidden truncate text-xs text-slate-400 sm:inline">
-              {t("editor.updatedAt", { time: updatedLabel })}
+              更新于 {updatedLabel}
             </span>
           </div>
 
@@ -1372,10 +1246,10 @@ export const EditorPane = ({
                 )}
               >
                 {imageUploadState === "error"
-                  ? t("editor.uploadState.fileFailed")
+                  ? "文件上传失败"
                   : imageUploadState === "compressing"
-                    ? t("editor.uploadState.imageCompressing")
-                    : t("editor.uploadState.fileUploading")}
+                    ? "图片压缩中"
+                    : "文件上传中"}
               </span>
             )}
             <span className={cn("hidden rounded-md px-2 py-1 text-xs font-medium sm:inline-flex", saveStateClassName)}>
@@ -1391,7 +1265,7 @@ export const EditorPane = ({
                 disabled={mobileDoneDisabled}
                 onClick={handleMobileDone}
               >
-                {saveMutation.isPending ? t("editor.saveState.saving") : t("editor.done")}
+                {saveMutation.isPending ? "保存中" : "完成"}
               </button>
             )}
             <input
@@ -1410,9 +1284,9 @@ export const EditorPane = ({
                 className="sm:hidden"
                 size="icon"
                 variant="ghost"
-                title={t("editor.uploadAttachment")}
-                aria-label={t("editor.uploadAttachment")}
-                disabled={mobileDoneDisabled || effectiveReadOnly || saveBlocked}
+                title="上传附件"
+                aria-label="上传附件"
+                disabled={mobileDoneDisabled || effectiveReadOnly}
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Paperclip className="h-4 w-4" />
@@ -1423,8 +1297,8 @@ export const EditorPane = ({
                 className="sm:hidden"
                 size="icon"
                 variant={mobileToolbarOpen ? "soft" : "ghost"}
-                title={mobileToolbarOpen ? t("editor.collapseFormat") : t("editor.format")}
-                aria-label={mobileToolbarOpen ? t("editor.collapseFormat") : t("editor.format")}
+                title={mobileToolbarOpen ? "收起格式" : "格式"}
+                aria-label={mobileToolbarOpen ? "收起格式" : "格式"}
                 aria-pressed={mobileToolbarOpen}
                 disabled={effectiveReadOnly}
                 onClick={() => setMobileToolbarOpen((open) => !open)}
@@ -1432,10 +1306,10 @@ export const EditorPane = ({
                 <Type className="h-4 w-4" />
               </Button>
             )}
-            <Button className="hidden sm:inline-flex" size="icon" variant="ghost" title={t("editor.searchCurrentMemo")} aria-label={t("editor.searchCurrentMemo")} onClick={() => openNoteSearch()}>
+            <Button className="hidden sm:inline-flex" size="icon" variant="ghost" title="搜索当前笔记" aria-label="搜索当前笔记" onClick={() => openNoteSearch()}>
               <Search className="h-4 w-4" />
             </Button>
-            <Button className="hidden sm:inline-flex" size="icon" variant="ghost" title={t("editor.versionHistory")} aria-label={t("editor.versionHistory")} disabled={saveBlocked} onClick={() => setHistoryOpen(true)}>
+            <Button className="hidden sm:inline-flex" size="icon" variant="ghost" title="版本历史" aria-label="版本历史" onClick={() => setHistoryOpen(true)}>
               <History className="h-4 w-4" />
             </Button>
             <GitHubRepositoryLink className="hidden h-8 w-8 justify-center rounded-md text-slate-500 transition hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70 lg:inline-flex" />
@@ -1444,10 +1318,10 @@ export const EditorPane = ({
                 className="hidden sm:inline-flex"
                 size="icon"
                 variant="solid"
-                title={t("editor.save")}
-                aria-label={t("editor.save")}
+                title="保存"
+                aria-label="保存"
                 onClick={() => saveMutation.mutate()}
-                disabled={!editor || saveBlocked || saveMutation.isPending || !hasUnsavedChanges}
+                disabled={!editor || saveMutation.isPending || !hasUnsavedChanges}
               >
                 <Save className="h-4 w-4" />
               </Button>
@@ -1458,8 +1332,8 @@ export const EditorPane = ({
                   className={cn(!isMobileEditing && !readOnly && "hidden sm:inline-flex")}
                   size="icon"
                   variant="ghost"
-                  title={t("editor.more")}
-                  aria-label={t("editor.moreAria")}
+                  title="更多"
+                  aria-label="笔记更多操作"
                 >
                   <MoreHorizontal className="h-4 w-4" />
                 </Button>
@@ -1470,24 +1344,23 @@ export const EditorPane = ({
                   onClick={() => openNoteSearch()}
                 >
                   <Search className="h-4 w-4 text-slate-500" />
-                  {t("editor.searchCurrentMemo")}
+                  搜索当前笔记
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                   onClick={openNoteReplace}
                 >
                   <ReplaceAll className="h-4 w-4 text-slate-500" />
-                  {t("editor.replaceCurrentMemo")}
+                  替换当前笔记
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                  disabled={saveBlocked}
                   onClick={() => {
                     setHistoryOpen(true);
                   }}
                 >
                   <History className="h-4 w-4 text-slate-500" />
-                  {t("editor.versionHistory")}
+                  版本历史
                 </DropdownMenuItem>
                 {readOnly ? (
                   <>
@@ -1496,16 +1369,15 @@ export const EditorPane = ({
                       onClick={() => void onRestored(memo.id)}
                     >
                       <RotateCcw className="h-4 w-4 text-slate-500" />
-                      {t("editor.restoreMemo")}
+                      恢复笔记
                     </DropdownMenuItem>
                     <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                     <DropdownMenuItem
                       className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-rose-700 hover:bg-rose-50 cursor-pointer outline-none"
-                      disabled={saveBlocked}
                       onClick={() => void onPermanentDeleted(memo.id)}
                     >
                       <Trash2 className="h-4 w-4" />
-                      {t("editor.deleteForever")}
+                      彻底删除
                     </DropdownMenuItem>
                   </>
                 ) : (
@@ -1513,11 +1385,10 @@ export const EditorPane = ({
                     <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                     <DropdownMenuItem
                       className="flex h-9 w-full items-center gap-2 px-3 text-left text-sm text-rose-700 hover:bg-rose-50 cursor-pointer outline-none"
-                      disabled={saveBlocked}
                       onClick={() => void onDeleted(memo.id)}
                     >
                       <Trash2 className="h-4 w-4" />
-                      {t("editor.deleteMemo")}
+                      删除笔记
                     </DropdownMenuItem>
                   </>
                 )}
@@ -1536,15 +1407,15 @@ export const EditorPane = ({
               markDirty();
             }}
             className="block w-full rounded-md border-0 bg-transparent text-2xl font-bold leading-tight text-slate-950 outline-none transition placeholder:text-slate-300 focus-visible:bg-slate-50 focus-visible:shadow-[inset_3px_0_0_var(--brand-green)] sm:text-3xl"
-            placeholder={t("common.untitledMemo")}
+            placeholder={DEFAULT_MEMO_TITLE}
           />
           <div className="flex flex-wrap items-center gap-2">
             <button
               className="flex h-8 min-w-0 max-w-full items-center gap-1 rounded-md border border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 outline-none transition hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900 focus-visible:border-emerald-300 focus-visible:ring-2 focus-visible:ring-emerald-500/20 disabled:opacity-50 sm:hidden"
               type="button"
-              disabled={saveBlocked || effectiveReadOnly || notebookUpdatePending}
-              title={t("editor.currentNotebook")}
-              aria-label={t("editor.currentNotebookAria", { name: currentNotebookLabel })}
+              disabled={effectiveReadOnly || notebookUpdatePending}
+              title="所在笔记本"
+              aria-label={`所在笔记本：${currentNotebookLabel}`}
               onClick={() => setMobileNotebookSheetOpen(true)}
             >
               <span className="min-w-0 truncate">{currentNotebookLabel}</span>
@@ -1553,11 +1424,11 @@ export const EditorPane = ({
             <div className="hidden min-w-[9rem] max-w-[18rem] sm:block">
               <Select
                 value={memo.notebookId}
-                disabled={saveBlocked || effectiveReadOnly || notebookUpdatePending}
+                disabled={effectiveReadOnly || notebookUpdatePending}
                 onValueChange={(value) => handleNotebookChange(value)}
               >
                 <SelectTrigger className="h-8 min-w-0 border-transparent bg-transparent px-2 text-sm font-medium text-slate-600 hover:border-slate-200 hover:bg-slate-50 hover:text-slate-900 whitespace-nowrap">
-                  <SelectValue placeholder={t("editor.notebookPlaceholder")} />
+                  <SelectValue placeholder="所在笔记本" />
                 </SelectTrigger>
                 <SelectContent className="max-h-60 bg-white border border-slate-200 rounded-md py-1 shadow-md">
                   {notebookOptions.map((notebook) => (
@@ -1579,7 +1450,7 @@ export const EditorPane = ({
                   markDirty();
                 }}
                 className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-slate-400"
-                placeholder={t("editor.tagPlaceholder")}
+                placeholder="添加标签，用逗号分隔"
               />
             </label>
           </div>
@@ -1591,7 +1462,7 @@ export const EditorPane = ({
               ref={noteSearchInputRef}
               value={noteSearchQuery}
               className="h-8 min-w-[12rem] flex-1"
-              placeholder={t("editor.searchPlaceholder")}
+              placeholder="在当前笔记内搜索"
               onChange={(event) => setNoteSearchQuery(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -1610,7 +1481,7 @@ export const EditorPane = ({
                 ref={noteReplaceInputRef}
                 value={noteSearchReplacement}
                 className="h-8 min-w-[12rem] flex-1"
-                placeholder={t("editor.replacePlaceholder")}
+                placeholder="替换为"
                 disabled={effectiveReadOnly}
                 onChange={(event) => setNoteSearchReplacement(event.target.value)}
                 onKeyDown={(event) => {
@@ -1638,8 +1509,8 @@ export const EditorPane = ({
             <Button
               size="icon"
               variant="ghost"
-              title={t("editor.previousSearchResult")}
-              aria-label={t("editor.previousSearchResult")}
+              title="上一个搜索结果"
+              aria-label="上一个搜索结果"
               disabled={noteSearchMatches.length === 0}
               onClick={() => moveNoteSearchMatch(-1)}
             >
@@ -1648,8 +1519,8 @@ export const EditorPane = ({
             <Button
               size="icon"
               variant="ghost"
-              title={t("editor.nextSearchResult")}
-              aria-label={t("editor.nextSearchResult")}
+              title="下一个搜索结果"
+              aria-label="下一个搜索结果"
               disabled={noteSearchMatches.length === 0}
               onClick={() => moveNoteSearchMatch(1)}
             >
@@ -1659,16 +1530,16 @@ export const EditorPane = ({
               <Button
                 size="sm"
                 variant="solid"
-                title={t("editor.replaceAll")}
-                aria-label={t("editor.replaceAll")}
+                title="全部替换"
+                aria-label="全部替换"
                 disabled={effectiveReadOnly || noteSearchMatches.length === 0}
                 onClick={replaceAllNoteSearchMatches}
               >
                 <ReplaceAll className="h-4 w-4" />
-                {t("editor.replaceAll")}
+                全部替换
               </Button>
             )}
-            <Button size="icon" variant="ghost" title={t("editor.closeSearch")} aria-label={t("editor.closeSearch")} onClick={closeNoteSearch}>
+            <Button size="icon" variant="ghost" title="关闭搜索" aria-label="关闭搜索" onClick={closeNoteSearch}>
               <X className="h-4 w-4" />
             </Button>
           </div>
@@ -1685,8 +1556,8 @@ export const EditorPane = ({
           className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 z-30 h-12 w-12 rounded-full shadow-lg sm:hidden"
           size="icon"
           variant="solid"
-          title={t("editor.editMemo")}
-          aria-label={t("editor.editMemo")}
+          title="编辑笔记"
+          aria-label="编辑笔记"
           onClick={() => setIsMobileEditing(true)}
         >
           <Pencil className="h-5 w-5" />
@@ -1710,7 +1581,7 @@ export const EditorPane = ({
 
       {mobileNotebookSheetOpen && (
         <MobileNotebookSelectSheet
-          isUpdating={saveBlocked || notebookUpdatePending || saveMutation.isPending}
+          isUpdating={notebookUpdatePending || saveMutation.isPending}
           options={notebookOptions}
           selectedNotebookId={memo.notebookId}
           onClose={() => setMobileNotebookSheetOpen(false)}
