@@ -1643,24 +1643,48 @@ const SearchView = ({
   </View>
 );
 
-const AccountView = ({ instance, userName, onSignOut }: { instance: string; userName: string; onSignOut: () => void }) => (
-  <ScrollView contentContainerStyle={styles.panelList} style={styles.viewBody}>
-    <Text style={styles.sectionTitle}>账户</Text>
-    <PanelRow label="当前用户" value={userName} />
-    <PanelRow label="实例地址" value={instance} />
-    <Pressable accessibilityRole="link" onPress={() => Linking.openURL(GITHUB_REPOSITORY_URL)} style={[styles.panelRow, styles.panelLinkRow]}>
-      <View style={styles.panelLinkText}>
-        <Text style={styles.panelLabel}>GitHub 仓库</Text>
-        <Text style={styles.panelValue}>tianma-if/edgeever</Text>
-      </View>
-      <ExternalLink color="#0f172a" size={18} />
-    </Pressable>
-    <Pressable onPress={onSignOut} style={styles.dangerButton}>
-      <LogOut color="#b91c1c" size={18} />
-      <Text style={styles.dangerButtonText}>退出登录</Text>
-    </Pressable>
-  </ScrollView>
-);
+const AccountView = ({ instance, userName, onSignOut }: { instance: string; userName: string; onSignOut: () => void }) => {
+  const [copied, setCopied] = useState(false);
+
+  const copyAccountInfo = async () => {
+    const accountInfo = [
+      `当前用户: ${userName}`,
+      `实例地址: ${instance || "未连接"}`,
+      `移动端版本: v${MOBILE_APP_VERSION}`,
+      `GitHub 仓库: ${GITHUB_REPOSITORY_URL}`,
+    ].join("\n");
+
+    await Clipboard.setStringAsync(accountInfo);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  };
+
+  return (
+    <ScrollView contentContainerStyle={styles.panelList} style={styles.viewBody}>
+      <Text style={styles.sectionTitle}>账户</Text>
+      <PanelRow label="当前用户" value={userName} />
+      <PanelRow label="实例地址" value={instance} />
+      <Pressable accessibilityRole="button" onPress={copyAccountInfo} style={[styles.panelRow, styles.panelLinkRow]}>
+        <View style={styles.panelLinkText}>
+          <Text style={styles.panelLabel}>账户信息</Text>
+          <Text style={styles.panelValue}>{copied ? "已复制" : "复制当前连接信息"}</Text>
+        </View>
+        {copied ? <ShieldCheck color="#047857" size={18} /> : <Copy color="#0f172a" size={18} />}
+      </Pressable>
+      <Pressable accessibilityRole="link" onPress={() => Linking.openURL(GITHUB_REPOSITORY_URL)} style={[styles.panelRow, styles.panelLinkRow]}>
+        <View style={styles.panelLinkText}>
+          <Text style={styles.panelLabel}>GitHub 仓库</Text>
+          <Text style={styles.panelValue}>tianma-if/edgeever</Text>
+        </View>
+        <ExternalLink color="#0f172a" size={18} />
+      </Pressable>
+      <Pressable onPress={onSignOut} style={styles.dangerButton}>
+        <LogOut color="#b91c1c" size={18} />
+        <Text style={styles.dangerButtonText}>退出登录</Text>
+      </Pressable>
+    </ScrollView>
+  );
+};
 
 const SettingsView = ({
   imageCompressionEnabled,
