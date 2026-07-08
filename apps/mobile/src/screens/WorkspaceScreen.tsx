@@ -1661,17 +1661,7 @@ const CreateMemoModal = ({
 
         <ScrollView contentContainerStyle={styles.editorForm}>
           <Text style={styles.label}>笔记本</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {notebooks.map((notebook) => (
-              <NotebookPill
-                active={(notebookId || fallbackNotebookId) === notebook.id}
-                key={notebook.id}
-                label={notebook.name}
-                memoCount={notebook.memoCount}
-                onPress={() => setNotebookId(notebook.id)}
-              />
-            ))}
-          </ScrollView>
+          <NotebookPicker notebooks={notebooks} onChange={setNotebookId} selectedNotebookId={notebookId || fallbackNotebookId} />
 
           <Text style={styles.label}>标题</Text>
           <TextInput onChangeText={setTitle} placeholder={DEFAULT_MEMO_TITLE} placeholderTextColor="#94a3b8" style={styles.titleInput} value={title} />
@@ -3864,17 +3854,7 @@ const EditMemoModal = ({
 
         <ScrollView contentContainerStyle={styles.editorForm}>
           <Text style={styles.label}>笔记本</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {notebooks.map((notebook) => (
-              <NotebookPill
-                active={notebookId === notebook.id}
-                key={notebook.id}
-                label={notebook.name}
-                memoCount={notebook.memoCount}
-                onPress={() => setNotebookId(notebook.id)}
-              />
-            ))}
-          </ScrollView>
+          <NotebookPicker notebooks={notebooks} onChange={setNotebookId} selectedNotebookId={notebookId} />
 
           <Text style={styles.label}>标题</Text>
           <TextInput onChangeText={setTitle} placeholder={DEFAULT_MEMO_TITLE} placeholderTextColor="#94a3b8" style={styles.titleInput} value={title} />
@@ -4196,6 +4176,28 @@ const NotebookParentSelector = ({
         active={currentParentId === notebook.id}
         key={notebook.id}
         label={`${"  ".repeat(depth)}${depth > 0 ? "└ " : ""}${notebook.name}`}
+        onPress={() => onChange(notebook.id)}
+      />
+    ))}
+  </ScrollView>
+);
+
+const NotebookPicker = ({
+  notebooks,
+  onChange,
+  selectedNotebookId,
+}: {
+  notebooks: Notebook[];
+  onChange: (notebookId: string) => void;
+  selectedNotebookId: string;
+}) => (
+  <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+    {flattenNotebooks(notebooks).map(({ depth, notebook }) => (
+      <NotebookPill
+        active={selectedNotebookId === notebook.id}
+        key={notebook.id}
+        label={`${"  ".repeat(depth)}${depth > 0 ? "└ " : ""}${notebook.name}`}
+        memoCount={notebook.memoCount}
         onPress={() => onChange(notebook.id)}
       />
     ))}
