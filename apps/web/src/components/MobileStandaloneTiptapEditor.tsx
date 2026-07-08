@@ -453,11 +453,14 @@ export const MobileStandaloneTiptapEditor = ({
     }
     setSaveStateStable("leaving");
 
-    await Promise.race([
-      saveNow({ keepalive: true }),
-      new Promise((resolve) => window.setTimeout(resolve, MOBILE_EDITOR_LEAVE_SAVE_TIMEOUT_MS)),
-    ]);
-    navigateBack();
+    try {
+      await Promise.race([
+        saveNow({ keepalive: true }),
+        new Promise((resolve) => window.setTimeout(resolve, MOBILE_EDITOR_LEAVE_SAVE_TIMEOUT_MS)),
+      ]);
+    } finally {
+      navigateBack();
+    }
   }, [navigateBack, persistLocalDraft, saveNow, setSaveStateStable]);
 
   const handleTitleChange = (nextTitle: string) => {
@@ -666,12 +669,6 @@ export const MobileStandaloneTiptapEditor = ({
   }, [editor, focusEditorAfterLoad, memoId, readBestLocalDraft, scheduleMetadataSave, setSaveStateStable]);
 
   useEffect(() => {
-    window.history.replaceState({ edgeeverMobileEditor: true }, "");
-    window.history.pushState({ edgeeverMobileEditorBackGuard: true }, "");
-
-    const handlePopState = () => {
-      void leavePage();
-    };
     const handlePageHide = () => {
       if (dirtyRef.current) {
         persistLocalDraft();
@@ -728,13 +725,11 @@ export const MobileStandaloneTiptapEditor = ({
       });
     };
 
-    window.addEventListener("popstate", handlePopState);
     window.addEventListener("pagehide", handlePageHide);
     window.addEventListener("online", handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      window.removeEventListener("popstate", handlePopState);
       window.removeEventListener("pagehide", handlePageHide);
       window.removeEventListener("online", handleOnline);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -745,7 +740,7 @@ export const MobileStandaloneTiptapEditor = ({
         window.clearTimeout(initialFocusTimerRef.current);
       }
     };
-  }, [currentSnapshot, draftKey, leavePage, persistLocalDraft, reconcileBackgroundSave, saveNow, sendBackgroundSave, setSaveStateStable]);
+  }, [currentSnapshot, draftKey, persistLocalDraft, reconcileBackgroundSave, saveNow, sendBackgroundSave, setSaveStateStable]);
 
   const saveLabel = getMobileEditorSaveLabel(saveState);
   const statusClassName = getMobileEditorStatusClassName(saveState);

@@ -935,6 +935,7 @@ export const EditorPane = (props: EditorPaneProps) => {
     typeof window === "undefined" ? false : window.matchMedia(MOBILE_EDITOR_QUERY).matches
   );
   const [mobileNativeEditMemoId, setMobileNativeEditMemoId] = useState<string | null>(null);
+  const standaloneOpenMemoIdRef = useRef<string | null>(null);
   const readOnly = props.isTrashView || Boolean(props.memo?.isDeleted);
   const mobileDefaultEditRequested = Boolean(
     props.memo?.id && props.memo.id === props.mobileDefaultEditMemoId && !readOnly
@@ -948,9 +949,15 @@ export const EditorPane = (props: EditorPaneProps) => {
 
   useEffect(() => {
     if (isMobileViewport && mobileDefaultEditRequested && props.memo?.id) {
+      if (standaloneOpenMemoIdRef.current === props.memo.id) {
+        return;
+      }
+
+      standaloneOpenMemoIdRef.current = props.memo.id;
+      props.onMobileDefaultEditConsumed();
       openStandaloneMobileEditor(props.memo.id);
     }
-  }, [isMobileViewport, mobileDefaultEditRequested, props.memo?.id]);
+  }, [isMobileViewport, mobileDefaultEditRequested, props.memo?.id, props.onMobileDefaultEditConsumed]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(MOBILE_EDITOR_QUERY);
