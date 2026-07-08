@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult } from "@tanstack/react-query";
 import * as Clipboard from "expo-clipboard";
 import * as DocumentPicker from "expo-document-picker";
+import { manipulateAsync, SaveFormat } from "expo-image-manipulator";
 import type { MemoFilterMode, MemoSortMode } from "@edgeever/client";
 import {
   Archive,
@@ -55,6 +56,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -63,8 +65,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import type { ApiToken, MemoDetail, MemoRevision, MemoSummary, Notebook, ResourceListItem, TagSummary } from "@edgeever/shared";
 import { clearMobileMemoDraft, readMobileMemoDraft, writeMobileMemoDraft } from "../lib/mobile-drafts";
 import {
+  readMobileImageCompressionEnabled,
   readMobileMemoListDensity,
   readMobileNotebookSort,
+  writeMobileImageCompressionEnabled,
   writeMobileMemoListDensity,
   writeMobileNotebookSort,
   type MobileMemoListDensity,
@@ -150,6 +154,9 @@ const ADVANCED_PROMPTS = [
       "请通过 EdgeEver MCP 读取我的笔记和现有标签，帮我设计一套更清晰的标签体系。请指出重复、过细、过宽或命名不一致的标签，并给出合并、重命名和新增标签建议。先不要修改笔记，等我确认后再执行。",
   },
 ];
+const COMPRESSIBLE_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/avif"]);
+const MAX_COMPRESSED_IMAGE_EDGE = 2560;
+const IMAGE_COMPRESSION_QUALITY = 0.82;
 
 type MobileView = "notes" | "search" | "account" | "settings";
 type MemoView = "notebook" | "trash";
@@ -181,6 +188,7 @@ export const WorkspaceScreen = () => {
   const [memoSortMode, setMemoSortMode] = useState<MemoSortMode>("updated-desc");
   const [memoListDensity, setMemoListDensity] = useState<MobileMemoListDensity>("preview");
   const [notebookSortMode, setNotebookSortMode] = useState<MobileNotebookSortMode>("manual");
+  const [imageCompressionEnabled, setImageCompressionEnabled] = useState(true);
   const [selectedMemoId, setSelectedMemoId] = useState<string | null>(null);
   const [searchText, setSearchText] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
@@ -333,6 +341,20 @@ export const WorkspaceScreen = () => {
   useEffect(() => {
     let mounted = true;
 
+    readMobileImageCompressionEnabled().then((enabled) => {
+      if (mounted) {
+        setImageCompressionEnabled(enabled);
+      }
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
     readMobileMemoListDensity().then((density) => {
       if (mounted) {
         setMemoListDensity(density);
@@ -366,6 +388,11 @@ export const WorkspaceScreen = () => {
   const handleNotebookSortModeChange = (sortMode: MobileNotebookSortMode) => {
     setNotebookSortMode(sortMode);
     void writeMobileNotebookSort(sortMode);
+  };
+
+  const handleImageCompressionChange = (enabled: boolean) => {
+    setImageCompressionEnabled(enabled);
+    void writeMobileImageCompressionEnabled(enabled);
   };
 
   const invalidateWorkspace = async () => {
@@ -648,6 +675,8 @@ export const WorkspaceScreen = () => {
           syncQueueMessage={syncQueueMessage}
           syncQueueSummary={syncQueueSummary}
           isSyncingQueue={isSyncingQueue}
+          imageCompressionEnabled={imageCompressionEnabled}
+          onImageCompressionChange={handleImageCompressionChange}
         />
       ) : null}
 
@@ -669,6 +698,7 @@ export const WorkspaceScreen = () => {
 
       <EditMemoModal
         memo={editingMemo}
+        imageCompressionEnabled={imageCompressionEnabled}
         notebooks={notebooks}
         onClose={() => setEditingMemo(null)}
         onQueued={async () => {
@@ -691,7 +721,7 @@ export const WorkspaceScreen = () => {
         visible={notebookManagerOpen}
       />
       <TagsManagerModal onClose={() => setTagsManagerOpen(false)} visible={tagsManagerOpen} />
-      <ResourcesModal activeMemo={selectedMemo} onClose={() => setResourcesOpen(false)} visible={resourcesOpen} />
+      <ResourcesModal activeMemo={selectedMemo} imageCompressionEnabled={imageCompressionEnabled} onClose={() => setResourcesOpen(false)} visible={resourcesOpen} />
       <ApiTokensModal baseUrl={session?.baseUrl ?? ""} onClose={() => setApiTokensOpen(false)} visible={apiTokensOpen} />
       <EvernoteGuideModal onClose={() => setEvernoteGuideOpen(false)} visible={evernoteGuideOpen} />
       <AdvancedPlayModal onClose={() => setAdvancedPlayOpen(false)} visible={advancedPlayOpen} />
@@ -1027,9 +1057,11 @@ const AccountView = ({ instance, userName, onSignOut }: { instance: string; user
 );
 
 const SettingsView = ({
+  imageCompressionEnabled,
   isSyncingQueue,
   memoCount,
   notebookCount,
+  onImageCompressionChange,
   onOpenAdvancedPlay,
   onOpenApiTokens,
   onOpenEvernoteGuide,
@@ -1042,9 +1074,11 @@ const SettingsView = ({
   syncQueueMessage,
   syncQueueSummary,
 }: {
+  imageCompressionEnabled: boolean;
   isSyncingQueue: boolean;
   memoCount: number;
   notebookCount: number;
+  onImageCompressionChange: (enabled: boolean) => void;
   onOpenAdvancedPlay: () => void;
   onOpenApiTokens: () => void;
   onOpenEvernoteGuide: () => void;
@@ -1086,6 +1120,16 @@ const SettingsView = ({
     <PanelRow label="移动端形态" value="React Native" />
     <PanelRow label="笔记本数量" value={String(notebookCount)} />
     <PanelRow label="笔记总数" value={String(memoCount)} />
+    <View style={styles.panelRow}>
+      <View style={styles.preferenceRow}>
+        <View style={styles.preferenceText}>
+          <Text style={styles.panelLabel}>图片上传压缩</Text>
+          <Text style={styles.panelValue}>{imageCompressionEnabled ? "已开启" : "已关闭"}</Text>
+          <Text style={styles.panelHint}>开启后会把支持的图片压缩为 WebP，降低移动网络和存储占用。</Text>
+        </View>
+        <Switch onValueChange={onImageCompressionChange} value={imageCompressionEnabled} />
+      </View>
+    </View>
     <SyncQueuePanel isSyncing={isSyncingQueue} message={syncQueueMessage} onSync={onSyncQueuedChanges} summary={syncQueueSummary} />
     <PanelRow label="富文本编辑器" value="待接入 WebView TipTap" />
   </ScrollView>
@@ -2101,10 +2145,12 @@ const DOCUMENT_MIME_TYPES = new Set([
 
 const ResourcesModal = ({
   activeMemo,
+  imageCompressionEnabled,
   onClose,
   visible,
 }: {
   activeMemo: MemoDetail | null;
+  imageCompressionEnabled: boolean;
   onClose: () => void;
   visible: boolean;
 }) => {
@@ -2153,15 +2199,12 @@ const ResourcesModal = ({
       }
 
       const form = new FormData();
-      form.append("file", {
-        uri: asset.uri,
-        name: asset.name || "upload",
-        type: asset.mimeType || "application/octet-stream",
-      } as unknown as Blob);
+      const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
+      form.append("file", uploadAsset as unknown as Blob);
 
       const { resource } = await client.uploadMemoResource(activeMemo.id, form);
       const nextMarkdown = appendResourceMarkdown(activeMemo.contentMarkdown || activeMemo.contentText || "", {
-        filename: resource.filename || asset.name || "upload",
+        filename: resource.filename || uploadAsset.name || asset.name || "upload",
         kind: resource.kind,
         url: resource.url,
       });
@@ -2620,6 +2663,7 @@ const MemoDetailModal = ({
 );
 
 const EditMemoModal = ({
+  imageCompressionEnabled,
   memo,
   notebooks,
   onClose,
@@ -2627,6 +2671,7 @@ const EditMemoModal = ({
   onSaved,
   updateMutation,
 }: {
+  imageCompressionEnabled: boolean;
   memo: MemoDetail | null;
   notebooks: Notebook[];
   onClose: () => void;
@@ -2745,15 +2790,12 @@ const EditMemoModal = ({
       }
 
       const form = new FormData();
-      form.append("file", {
-        uri: asset.uri,
-        name: asset.name || "image",
-        type: asset.mimeType || "application/octet-stream",
-      } as unknown as Blob);
+      const uploadAsset = await prepareUploadAsset(asset, imageCompressionEnabled);
+      form.append("file", uploadAsset as unknown as Blob);
 
       const { resource } = await client.uploadMemoResource(memo.id, form);
       return {
-        filename: resource.filename || asset.name || "image",
+        filename: resource.filename || uploadAsset.name || asset.name || "image",
         kind: resource.kind,
         url: resource.url,
       };
@@ -3516,6 +3558,62 @@ const appendResourceMarkdown = (
   return trimmed ? `${trimmed}\n\n${markdown}\n` : `${markdown}\n`;
 };
 
+const prepareUploadAsset = async (
+  asset: DocumentPicker.DocumentPickerAsset,
+  imageCompressionEnabled: boolean
+): Promise<{ uri: string; name: string; type: string }> => {
+  const mimeType = asset.mimeType || "application/octet-stream";
+  const filename = asset.name || "upload";
+
+  if (!imageCompressionEnabled || !COMPRESSIBLE_IMAGE_TYPES.has(mimeType)) {
+    return {
+      uri: asset.uri,
+      name: filename,
+      type: mimeType,
+    };
+  }
+
+  try {
+    const measured = await manipulateAsync(asset.uri, [], { compress: 1, format: SaveFormat.JPEG });
+    const maxEdge = Math.max(measured.width, measured.height);
+    const resizeAction = maxEdge > MAX_COMPRESSED_IMAGE_EDGE ? [{ resize: getCompressedImageSize(measured.width, measured.height) }] : [];
+    const compressed = await manipulateAsync(asset.uri, resizeAction, {
+      compress: IMAGE_COMPRESSION_QUALITY,
+      format: SaveFormat.WEBP,
+    });
+
+    return {
+      uri: compressed.uri,
+      name: toCompressedImageFilename(filename),
+      type: "image/webp",
+    };
+  } catch {
+    return {
+      uri: asset.uri,
+      name: filename,
+      type: mimeType,
+    };
+  }
+};
+
+const getCompressedImageSize = (width: number, height: number) => {
+  if (width >= height) {
+    return { width: MAX_COMPRESSED_IMAGE_EDGE };
+  }
+
+  return { height: MAX_COMPRESSED_IMAGE_EDGE };
+};
+
+const toCompressedImageFilename = (filename: string) => {
+  const trimmed = filename.trim();
+
+  if (!trimmed) {
+    return "image.webp";
+  }
+
+  return trimmed.replace(/\.[^.]+$/, "") + ".webp";
+};
+
 const getTokenScopeLabel = (scope: string) => {
   const labels: Record<string, string> = {
     "read:notebooks": "读取笔记本",
@@ -3980,6 +4078,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700",
     lineHeight: 18,
+  },
+  preferenceRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: 12,
+    justifyContent: "space-between",
+  },
+  preferenceText: {
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
   },
   syncButton: {
     alignItems: "center",
