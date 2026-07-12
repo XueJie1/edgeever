@@ -1,0 +1,70 @@
+name: Sync upstream
+
+# Keeps this fork in sync with upstream tianma-if/edgeever so it receives
+# the latest features. Runs daily + on demand.
+# On a fork: open the Actions tab and click "I understand my workflows,
+# go ahead and enable them". Scheduled (cron) runs are disabled on forks
+# by default — enable them in Settings -> Actions -> General.
+# Pushes use the built-in GITHUB_TOKEN, which does NOT re-trigger other
+# GitHub Actions (so the inherited deploy.yml stays quiet), but DOES
+# notify the Cloudflare Workers Builds app to auto-rebuild & redeploy.
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # daily 03:17 UTC (~11:17 Beijing)
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: Sync strategy
+        required: true
+        default: merge
+        type: choice
+        options: [merge, reset]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync from tianma-if/edgeever
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure committer
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/tianma-if/edgeever.git
+
+      - name: Fetch upstream main
+        run: git fetch --no-tags upstream main
+
+      - name: Show incoming changes
+        run: |
+          echo "Fork HEAD : $(git rev-parse --short HEAD)"
+          echo "Upstream  : $(git rev-parse --short upstream/main)"
+          git --no-pager log --oneline HEAD..upstream/main | head -50 || true
+
+      - name: Sync (merge upstream into fork main)
+        if: github.event.inputs.strategy != 'reset'
+        run: git merge --no-edit upstream/main
+
+      - name: Sync (hard reset fork main to upstream)
+        if: github.event.inputs.strategy == 'reset'
+        run: git reset --hard upstream/main
+
+      - name: Push to fork main
+        run: git push origin main
