@@ -50,6 +50,9 @@ const sqlString = (value) => `'${value.replaceAll("'", "''")}'`;
 export const buildUserLookupSql = (username) =>
   `SELECT id FROM users WHERE username = ${sqlString(username)} AND is_disabled = 0 LIMIT 1`;
 
+export const buildPasswordHashLookupSql = (username) =>
+  `SELECT password_hash FROM users WHERE username = ${sqlString(username)} AND is_disabled = 0 LIMIT 1`;
+
 export const buildPasswordResetSql = (username, passwordHash) => {
   const escapedUsername = sqlString(username);
   const escapedHash = sqlString(passwordHash);
@@ -57,13 +60,11 @@ export const buildPasswordResetSql = (username, passwordHash) => {
   return `UPDATE users
 SET password_hash = ${escapedHash}, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE username = ${escapedUsername} AND is_disabled = 0;
-SELECT changes() AS updated_users;
 UPDATE sessions
 SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE user_id IN (
   SELECT id FROM users WHERE username = ${escapedUsername} AND is_disabled = 0
 ) AND revoked_at IS NULL;
-SELECT changes() AS revoked_sessions;
 `;
 };
 
@@ -125,23 +126,24 @@ const main = () => {
   const sqlPath = join(temporaryDirectory, "reset-password.sql");
 
   try {
-    writeFileSync(sqlPath, buildPasswordResetSql(options.username, createPasswordHash(password)), {
+    const passwordHash = createPasswordHash(password);
+    writeFileSync(sqlPath, buildPasswordResetSql(options.username, passwordHash), {
       mode: 0o600,
     });
-    const resetOutput = runWrangler([
+    runWrangler(["d1", "execute", "DB", targetFlag, "--file", sqlPath, "--yes"]);
+
+    const verificationOutput = runWrangler([
       "d1",
       "execute",
       "DB",
       targetFlag,
-      "--file",
-      sqlPath,
-      "--yes",
+      "--command",
+      buildPasswordHashLookupSql(options.username),
       "--json",
     ]);
-    const resetRows = parseD1Rows(resetOutput);
-    const updateResult = resetRows.find((row) => "updated_users" in row);
-    if (Number(updateResult?.updated_users) !== 1) {
-      throw new Error(`Password reset did not update exactly one user: ${options.username}`);
+    const [updatedUser] = parseD1Rows(verificationOutput);
+    if (updatedUser?.password_hash !== passwordHash) {
+      throw new Error(`Password reset verification failed: ${options.username}`);
     }
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });

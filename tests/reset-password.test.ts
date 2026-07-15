@@ -6,6 +6,7 @@ import {
   createPasswordHash,
 } from "../scripts/password-hash.mjs";
 import {
+  buildPasswordHashLookupSql,
   buildPasswordResetSql,
   buildUserLookupSql,
   parseD1Rows,
@@ -40,13 +41,13 @@ describe("password reset script", () => {
 
   test("escapes usernames and revokes existing sessions", () => {
     expect(buildUserLookupSql("demo'user")).toContain("username = 'demo''user'");
+    expect(buildPasswordHashLookupSql("demo'user")).toContain("username = 'demo''user'");
 
     const sql = buildPasswordResetSql("demo'user", "pbkdf2$hash");
     expect(sql).toContain("password_hash = 'pbkdf2$hash'");
     expect(sql).toContain("username = 'demo''user'");
     expect(sql).toContain("UPDATE sessions");
     expect(sql).toContain("revoked_at IS NULL");
-    expect(sql).toContain("SELECT changes() AS updated_users");
     expect(sql).not.toContain("BEGIN TRANSACTION");
   });
 

@@ -12,6 +12,8 @@ if (wranglerArgs.length === 0) {
   process.exit(1);
 }
 
+const requestedInstance = process.env.EDGE_EVER_INSTANCE;
+
 const loadLocalEnv = () => {
   const envPath = resolve(".env.local");
   if (!existsSync(envPath)) {
@@ -46,6 +48,13 @@ const loadLocalEnv = () => {
 };
 
 loadLocalEnv();
+
+// An instance selected for this command must take precedence over the default
+// stored in .env.local. Bun loads .env.local before this script starts, so
+// capture the effective process value before the explicit reload above.
+if (requestedInstance !== undefined) {
+  process.env.EDGE_EVER_INSTANCE = requestedInstance;
+}
 
 const baseConfigPath = resolve(process.env.WRANGLER_CONFIG ?? "wrangler.toml");
 const instance = process.env.EDGE_EVER_INSTANCE?.trim();
