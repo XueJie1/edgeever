@@ -1,0 +1,199 @@
+{
+  "extensionName": {
+    "message": "EdgeEver 网页剪藏"
+  },
+  "extensionDescription": {
+    "message": "将当前网页或选中的内容保存到你自托管的 EdgeEver 实例。"
+  },
+  "actionTitle": {
+    "message": "保存到 EdgeEver"
+  },
+  "webClipper": {
+    "message": "网页剪藏"
+  },
+  "popupDescription": {
+    "message": "剪藏当前网页或选中的内容到你的 EdgeEver。"
+  },
+  "saveCurrentPage": {
+    "message": "剪藏当前网页"
+  },
+  "pluginSettings": {
+    "message": "插件设置"
+  },
+  "readingAndSaving": {
+    "message": "正在读取网页并保存……"
+  },
+  "completePluginConfiguration": {
+    "message": "请先完成插件配置"
+  },
+  "savedToEdgeEver": {
+    "message": "已保存到 EdgeEver。"
+  },
+  "saveFailed": {
+    "message": "保存失败。"
+  },
+  "optionsTitle": {
+    "message": "EdgeEver Web Clipper 设置"
+  },
+  "diagnosticsTitle": {
+    "message": "关于与诊断信息"
+  },
+  "diagnosticsDescription": {
+    "message": "查看插件、浏览器、系统和连接信息。不会包含 API Token。"
+  },
+  "extensionVersion": {
+    "message": "插件版本"
+  },
+  "manifestVersion": {
+    "message": "Manifest 版本"
+  },
+  "browserVersion": {
+    "message": "浏览器"
+  },
+  "systemVersion": {
+    "message": "系统"
+  },
+  "extensionId": {
+    "message": "插件 ID"
+  },
+  "instanceOrigin": {
+    "message": "实例 Origin"
+  },
+  "instancePermission": {
+    "message": "实例访问权限"
+  },
+  "copyDiagnostics": {
+    "message": "复制诊断信息"
+  },
+  "diagnosticsCopied": {
+    "message": "诊断信息已复制。"
+  },
+  "diagnosticsCopyFailed": {
+    "message": "复制失败，请检查浏览器剪贴板权限。"
+  },
+  "permissionGranted": {
+    "message": "已授权"
+  },
+  "permissionNotGranted": {
+    "message": "未授权"
+  },
+  "permissionNotConfigured": {
+    "message": "未配置实例"
+  },
+  "notConfigured": {
+    "message": "未配置"
+  },
+  "invalidInstanceAddress": {
+    "message": "地址无效"
+  },
+  "unknownValue": {
+    "message": "未知"
+  },
+  "instanceAddress": {
+    "message": "EdgeEver 实例地址"
+  },
+  "tokenPlaceholder": {
+    "message": "从 EdgeEver 设置中创建"
+  },
+  "defaultNotebook": {
+    "message": "默认笔记本"
+  },
+  "autoFirstNotebook": {
+    "message": "连接后自动使用第一个笔记本"
+  },
+  "testConnection": {
+    "message": "测试连接"
+  },
+  "saveSettings": {
+    "message": "保存设置"
+  },
+  "projectAndSource": {
+    "message": "GitHub 项目与源码"
+  },
+  "reportIssue": {
+    "message": "反馈问题"
+  },
+  "privacyPolicy": {
+    "message": "隐私政策"
+  },
+  "connecting": {
+    "message": "正在连接……"
+  },
+  "connectionSuccessOne": {
+    "message": "连接成功，共 1 个笔记本。"
+  },
+  "connectionSuccessMany": {
+    "message": "连接成功，共 $COUNT$ 个笔记本。",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "connectionFailed": {
+    "message": "连接失败。"
+  },
+  "settingsSaved": {
+    "message": "设置已保存。"
+  },
+  "settingsSaveFailed": {
+    "message": "保存失败。"
+  },
+  "missingSettingsDetails": {
+    "message": "请先在插件设置中填写 EdgeEver 地址和 API Token。"
+  },
+  "instancePermissionRequired": {
+    "message": "需要允许插件访问你的 EdgeEver 实例。"
+  },
+  "requestFailed": {
+    "message": "EdgeEver 请求失败（$STATUS$）。",
+    "placeholders": {
+      "status": {
+        "content": "$1"
+      }
+    }
+  },
+  "sourceLabel": {
+    "message": "来源"
+  },
+  "capturedAtLabel": {
+    "message": "抓取时间"
+  },
+  "noAvailableNotebooks": {
+    "message": "EdgeEver 中没有可用的笔记本。"
+  },
+  "currentPageNotFound": {
+    "message": "找不到当前页面。"
+  },
+  "captureTimeout": {
+    "message": "网页内容提取在 15 秒内未完成，页面可能过大或仍在加载。请刷新页面后重试。"
+  },
+  "pageAccessDenied": {
+    "message": "插件无法读取此页面。请确认当前不是浏览器内置页、扩展商店页或受限页面。"
+  },
+  "captureScriptFailed": {
+    "message": "网页提取脚本执行失败：$DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "captureUnknownError": {
+    "message": "未返回具体错误"
+  },
+  "instanceNetworkFailed": {
+    "message": "无法连接 EdgeEver 实例。请检查实例地址、网络连接和跨域设置。"
+  },
+  "saveFailedWithReason": {
+    "message": "保存到 EdgeEver 失败：$DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "emptyPageContent": {
+    "message": "（网页没有可提取的正文内容）"
+  }
+}

@@ -1,0 +1,199 @@
+{
+  "extensionName": {
+    "message": "EdgeEver Web Clipper"
+  },
+  "extensionDescription": {
+    "message": "Save the current webpage or selected content to your self-hosted EdgeEver instance."
+  },
+  "actionTitle": {
+    "message": "Save to EdgeEver"
+  },
+  "webClipper": {
+    "message": "Web Clipper"
+  },
+  "popupDescription": {
+    "message": "Clip the current webpage or selected content to your EdgeEver."
+  },
+  "saveCurrentPage": {
+    "message": "Clip current page"
+  },
+  "pluginSettings": {
+    "message": "Extension settings"
+  },
+  "readingAndSaving": {
+    "message": "Reading and saving the webpage…"
+  },
+  "completePluginConfiguration": {
+    "message": "Please complete the extension setup"
+  },
+  "savedToEdgeEver": {
+    "message": "Saved to EdgeEver."
+  },
+  "saveFailed": {
+    "message": "Failed to save."
+  },
+  "optionsTitle": {
+    "message": "EdgeEver Web Clipper settings"
+  },
+  "diagnosticsTitle": {
+    "message": "About & diagnostics"
+  },
+  "diagnosticsDescription": {
+    "message": "View basic extension, browser, system, and connection information. API tokens are never included."
+  },
+  "extensionVersion": {
+    "message": "Extension version"
+  },
+  "manifestVersion": {
+    "message": "Manifest version"
+  },
+  "browserVersion": {
+    "message": "Browser"
+  },
+  "systemVersion": {
+    "message": "System"
+  },
+  "extensionId": {
+    "message": "Extension ID"
+  },
+  "instanceOrigin": {
+    "message": "Instance origin"
+  },
+  "instancePermission": {
+    "message": "Instance permission"
+  },
+  "copyDiagnostics": {
+    "message": "Copy diagnostics"
+  },
+  "diagnosticsCopied": {
+    "message": "Diagnostics copied."
+  },
+  "diagnosticsCopyFailed": {
+    "message": "Copy failed. Check the browser clipboard permission."
+  },
+  "permissionGranted": {
+    "message": "Granted"
+  },
+  "permissionNotGranted": {
+    "message": "Not granted"
+  },
+  "permissionNotConfigured": {
+    "message": "Instance not configured"
+  },
+  "notConfigured": {
+    "message": "Not configured"
+  },
+  "invalidInstanceAddress": {
+    "message": "Invalid address"
+  },
+  "unknownValue": {
+    "message": "Unknown"
+  },
+  "instanceAddress": {
+    "message": "EdgeEver instance URL"
+  },
+  "tokenPlaceholder": {
+    "message": "Create one in EdgeEver settings"
+  },
+  "defaultNotebook": {
+    "message": "Default notebook"
+  },
+  "autoFirstNotebook": {
+    "message": "Use the first notebook automatically after connecting"
+  },
+  "testConnection": {
+    "message": "Test connection"
+  },
+  "saveSettings": {
+    "message": "Save settings"
+  },
+  "projectAndSource": {
+    "message": "GitHub project & source"
+  },
+  "reportIssue": {
+    "message": "Report an issue"
+  },
+  "privacyPolicy": {
+    "message": "Privacy policy"
+  },
+  "connecting": {
+    "message": "Connecting…"
+  },
+  "connectionSuccessOne": {
+    "message": "Connected. Found 1 notebook."
+  },
+  "connectionSuccessMany": {
+    "message": "Connected. Found $COUNT$ notebooks.",
+    "placeholders": {
+      "count": {
+        "content": "$1"
+      }
+    }
+  },
+  "connectionFailed": {
+    "message": "Connection failed."
+  },
+  "settingsSaved": {
+    "message": "Settings saved."
+  },
+  "settingsSaveFailed": {
+    "message": "Failed to save settings."
+  },
+  "missingSettingsDetails": {
+    "message": "Enter the EdgeEver instance URL and API token in the extension settings first."
+  },
+  "instancePermissionRequired": {
+    "message": "Allow the extension to access your EdgeEver instance."
+  },
+  "requestFailed": {
+    "message": "EdgeEver request failed ($STATUS$).",
+    "placeholders": {
+      "status": {
+        "content": "$1"
+      }
+    }
+  },
+  "sourceLabel": {
+    "message": "Source"
+  },
+  "capturedAtLabel": {
+    "message": "Captured at"
+  },
+  "noAvailableNotebooks": {
+    "message": "No notebooks are available in EdgeEver."
+  },
+  "currentPageNotFound": {
+    "message": "Could not find the current page."
+  },
+  "captureTimeout": {
+    "message": "Page extraction did not finish within 15 seconds. The page may be large or still loading; refresh it and try again."
+  },
+  "pageAccessDenied": {
+    "message": "The extension cannot read this page. Browser internal pages, extension stores, and restricted pages cannot be captured."
+  },
+  "captureScriptFailed": {
+    "message": "The page extraction script failed: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "captureUnknownError": {
+    "message": "No further details were provided"
+  },
+  "instanceNetworkFailed": {
+    "message": "Could not connect to the EdgeEver instance. Check the instance URL, network connection, and CORS settings."
+  },
+  "saveFailedWithReason": {
+    "message": "Could not save to EdgeEver: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "emptyPageContent": {
+    "message": "(No readable content was found on this page)"
+  }
+}

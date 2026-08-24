@@ -1,6 +1,16 @@
+import { isSupportedPasswordHash } from "./auth-bootstrap";
+
 type PasswordHasher = (password: string) => Promise<string>;
 
 export const isDemoModeEnabled = (value: string | undefined) => value?.trim().toLowerCase() === "true";
+
+export const isProtectedDemoAccount = (
+  demoMode: string | undefined,
+  configuredUsername: string | undefined,
+  accountUsername: string,
+) =>
+  isDemoModeEnabled(demoMode)
+  && accountUsername === (configuredUsername?.trim() || "admin");
 
 export const shouldUpsertDemoSeedRecord = (
   existingIds: ReadonlySet<string>,
@@ -14,7 +24,7 @@ export const resolveDemoPasswordHash = async (
   hashPassword: PasswordHasher,
 ) => {
   const passwordHash = configuredPasswordHash?.trim();
-  if (passwordHash) {
+  if (passwordHash && isSupportedPasswordHash(passwordHash)) {
     return passwordHash;
   }
 

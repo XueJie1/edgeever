@@ -4,6 +4,7 @@ import {
   listNotebooks,
   type ExtensionSettings,
 } from "./extension";
+import { t } from "./i18n";
 
 type CapturedPage = {
   title: string;
@@ -13,14 +14,38 @@ type CapturedPage = {
 
 const toMarkdown = (page: CapturedPage) => {
   const capturedAt = new Date().toISOString();
-  return `# ${page.title.replace(/\n/g, " ")}\n\n来源：[${page.url}](${page.url})\n\n抓取时间：${capturedAt}\n\n---\n\n${page.markdown}`;
+  return `# ${page.title.replace(/\n/g, " ")}\n\n${t("sourceLabel")}: [${page.url}](${page.url})\n\n${t("capturedAtLabel")}: ${capturedAt}\n\n---\n\n${page.markdown}`;
+};
+
+const compactError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").trim().slice(0, 180);
+};
+
+const describeCaptureError = (error: unknown) => {
+  const message = compactError(error);
+  if (message === t("captureTimeout")) {
+    return message;
+  }
+  if (/cannot access (contents|a page)|missing host permission|extensions gallery|chrome:\/\/|edge:\/\/|about:\/\//i.test(message)) {
+    return t("pageAccessDenied");
+  }
+  return t("captureScriptFailed", message || t("captureUnknownError"));
+};
+
+const describeSaveError = (error: unknown) => {
+  const message = compactError(error);
+  if (/failed to fetch|networkerror|load failed|network request/i.test(message)) {
+    return t("instanceNetworkFailed");
+  }
+  return t("saveFailedWithReason", message || t("saveFailed"));
 };
 
 const createMemo = async (settings: ExtensionSettings, page: CapturedPage) => {
   const notebooks = await listNotebooks(settings);
   const notebookId = settings.notebookId || notebooks.notebooks[0]?.id;
   if (!notebookId) {
-    throw new Error("EdgeEver 中没有可用的笔记本。");
+    throw new Error(t("noAvailableNotebooks"));
   }
 
   await edgeEverRequest(settings, "/api/v1/memos", {
@@ -50,7 +75,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; page?: CapturedP
         const notebooks = await listNotebooks(settings);
         sendResponse({ ok: true, notebooks: notebooks.notebooks });
       } catch (error) {
-        sendResponse({ ok: false, message: error instanceof Error ? error.message : "连接失败。" });
+        sendResponse({ ok: false, message: error instanceof Error ? error.message : t("connectionFailed") });
       }
     })();
     return true;
@@ -62,13 +87,13 @@ chrome.runtime.onMessage.addListener((message: { type?: string; page?: CapturedP
         const settings = await getSettings();
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab?.id) {
-          throw new Error("找不到当前页面。");
+          throw new Error(t("currentPageNotFound"));
         }
 
         const page = await new Promise<CapturedPage>((resolve, reject) => {
           const timeout = setTimeout(() => {
             pendingCapture = null;
-            reject(new Error("网页内容提取超时，请重试。"));
+            reject(new Error(t("captureTimeout")));
           }, 15_000);
 
           pendingCapture = (capturedPage) => {
@@ -82,13 +107,19 @@ chrome.runtime.onMessage.addListener((message: { type?: string; page?: CapturedP
           }).catch((error: unknown) => {
             clearTimeout(timeout);
             pendingCapture = null;
-            reject(error);
+            reject(new Error(describeCaptureError(error)));
           });
         });
         await createMemo(settings, page);
         sendResponse({ ok: true });
       } catch (error) {
-        sendResponse({ ok: false, message: error instanceof Error ? error.message : "保存失败。" });
+        const message = error instanceof Error ? error.message : "";
+        sendResponse({
+          ok: false,
+          message: message === t("captureTimeout") || message.startsWith(t("captureScriptFailed", ""))
+            ? describeCaptureError(error)
+            : describeSaveError(error),
+        });
       }
     })();
     return true;

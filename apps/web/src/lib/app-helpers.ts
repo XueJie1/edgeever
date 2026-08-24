@@ -1,5 +1,6 @@
 import type { MemoSummary, Notebook, TiptapDoc } from "@edgeever/shared";
 import { DEFAULT_MEMO_TITLE } from "@edgeever/shared";
+import { getMobileNotebookSearchVisibleIds } from "@edgeever/shared/mobile-ui";
 import { buildNotebookTree, type NotebookNode, type NotebookNodeComparator } from "./utils";
 import * as React from "react";
 import type { ReactNode } from "react";
@@ -9,9 +10,23 @@ export type Pane = "notebooks" | "memos" | "editor";
 export type MemoView = "notebook" | "trash";
 export type MemoFilterMode = "all" | "tagged" | "untagged" | "pinned";
 export type MemoSortMode = "updated-desc" | "created-desc" | "title-asc";
-export type NotebookSortMode = "name-asc" | "memo-count-desc" | "updated-desc";
+export type NotebookSortMode = "custom" | "name-asc" | "memo-count-desc" | "updated-desc";
+export type EditorContentAlignment = "start" | "center";
 export type MemoListDensity = "preview" | "compact";
-export type ShortcutAction = "createMemo" | "createNotebook" | "focusSearch" | "focusReplace";
+export type ShortcutAction =
+  | "createMemo"
+  | "createNotebook"
+  | "focusSearch"
+  | "focusGlobalSearch"
+  | "focusReplace"
+  | "openQuickSwitcher"
+  | "openPreviousMemo"
+  | "openNextMemo"
+  | "openAiAssistant"
+  | "saveAndSync"
+  | "toggleReadingProtection"
+  | "toggleEditorMode"
+  | "toggleOutline";
 export type ShortcutBinding = {
   key: string;
   ctrlOrMeta: boolean;
@@ -21,6 +36,19 @@ export type ShortcutBinding = {
 export type ShortcutSettings = Record<ShortcutAction, ShortcutBinding>;
 export type MobileBottomNavItem = "home" | "search" | "templates" | "settings";
 export type MemoContextMenuState = { memo: MemoSummary; x: number; y: number };
+export type MemoDocumentAction =
+  | "share"
+  | "export-markdown"
+  | "export-html"
+  | "export-pdf"
+  | "share-image"
+  | "save-as-template";
+export type MemoDocumentActionRequest = {
+  id: number;
+  memoId: string;
+  action: MemoDocumentAction;
+  printWindow?: Window | null;
+};
 export type MemoSelectionContextMenuState = { x: number; y: number };
 export type NotebookContextMenuState = { notebook: NotebookNode; x: number; y: number };
 export type MemoDeleteConfirmation = { kind: "single" | "bulk"; memoIds: string[]; permanent: boolean };
@@ -30,52 +58,6 @@ export type NotebookNameDialogState =
   | { mode: "rename"; notebook: Notebook };
 
 export type AppNoticeDialogState = { title: string; description: string };
-
-export type MemoTemplate = {
-  id: string;
-  title: string;
-  description: string;
-  contentMarkdown: string;
-  tags: string[];
-};
-
-export const getMemoTemplates = (t: TFunction): MemoTemplate[] => [
-  {
-    id: "quick-note",
-    title: t("templates.items.quickNote.title"),
-    description: t("templates.items.quickNote.description"),
-    contentMarkdown: t("templates.items.quickNote.contentMarkdown"),
-    tags: ["template", "quick-note"],
-  },
-  {
-    id: "meeting",
-    title: t("templates.items.meeting.title"),
-    description: t("templates.items.meeting.description"),
-    contentMarkdown: t("templates.items.meeting.contentMarkdown"),
-    tags: ["template", "meeting"],
-  },
-  {
-    id: "checklist",
-    title: t("templates.items.checklist.title"),
-    description: t("templates.items.checklist.description"),
-    contentMarkdown: t("templates.items.checklist.contentMarkdown"),
-    tags: ["template", "checklist"],
-  },
-  {
-    id: "reading",
-    title: t("templates.items.reading.title"),
-    description: t("templates.items.reading.description"),
-    contentMarkdown: t("templates.items.reading.contentMarkdown"),
-    tags: ["template", "reading"],
-  },
-  {
-    id: "daily",
-    title: t("templates.items.daily.title"),
-    description: t("templates.items.daily.description"),
-    contentMarkdown: t("templates.items.daily.contentMarkdown"),
-    tags: ["template", "daily"],
-  },
-];
 
 export const isTextEntryTarget = (target: EventTarget | null) =>
   target instanceof HTMLElement &&
@@ -117,30 +99,24 @@ export const getExpandableNotebookIds = (nodes: NotebookNode[]) => {
 };
 
 export const filterNotebookTree = (nodes: NotebookNode[], search: string): NotebookNode[] => {
-  const query = search.trim().toLocaleLowerCase("zh-CN");
-
-  if (!query) {
+  if (!search.trim()) {
     return nodes;
   }
 
-  const walk = (items: NotebookNode[]): NotebookNode[] => {
-    const filteredNodes: NotebookNode[] = [];
-
+  const notebooks: Notebook[] = [];
+  const collectNotebooks = (items: NotebookNode[]) => {
     for (const node of items) {
-      const children = walk(node.children);
-      const matched = node.name.toLocaleLowerCase("zh-CN").includes(query);
-
-      if (matched) {
-        filteredNodes.push({ ...node, children: node.children });
-        continue;
-      }
-
-      if (children.length > 0) {
-        filteredNodes.push({ ...node, children });
-      }
+      notebooks.push(node);
+      collectNotebooks(node.children);
     }
+  };
+  collectNotebooks(nodes);
+  const visibleIds = getMobileNotebookSearchVisibleIds(notebooks, search);
 
-    return filteredNodes;
+  const walk = (items: NotebookNode[]): NotebookNode[] => {
+    return items
+      .filter((node) => visibleIds.has(node.id))
+      .map((node) => ({ ...node, children: walk(node.children) }));
   };
 
   return walk(nodes);
@@ -150,6 +126,11 @@ export { buildNotebookTree, type NotebookNode };
 export { DEFAULT_MEMO_TITLE };
 
 export const IMAGE_COMPRESSION_STORAGE_KEY = "edgeever.imageCompressionEnabled";
+export const SYNC_INTERVAL_STORAGE_KEY = "edgeever.syncInterval";
+const LEGACY_AUTO_SAVE_INTERVAL_STORAGE_KEY = "edgeever.autoSaveInterval";
+export const DESKTOP_FOCUS_MODE_STORAGE_KEY = "edgeever.desktopFocusMode";
+export const DESKTOP_READING_PROTECTION_STORAGE_KEY = "edgeever.desktopReadingProtection";
+export const EDITOR_CONTENT_ALIGNMENT_STORAGE_KEY = "edgeever.editorContentAlignment";
 export const MEMO_LIST_DENSITY_STORAGE_KEY = "edgeever.memoListDensity";
 export const MEMO_LIST_WIDTH_STORAGE_KEY = "edgeever.memoListWidth";
 export const NOTEBOOK_SORT_STORAGE_KEY = "edgeever.notebookSort";
@@ -157,6 +138,19 @@ export const SHORTCUT_SETTINGS_STORAGE_KEY = "edgeever.shortcutSettings";
 export const DEFAULT_MEMO_LIST_WIDTH_PX = 360;
 export const MIN_MEMO_LIST_WIDTH_PX = 300;
 export const MAX_MEMO_LIST_WIDTH_PX = 540;
+export const EDITOR_LOCAL_SAVE_DELAY_MS = 1_200;
+
+export type SyncIntervalPreference = "30s" | "5m" | "15m" | "30m" | "1h" | "2h" | "off";
+export const DEFAULT_SYNC_INTERVAL_MS = 30_000;
+const SYNC_INTERVAL_VALUES: Record<SyncIntervalPreference, number | null> = {
+  "30s": 30_000,
+  "5m": 300_000,
+  "15m": 900_000,
+  "30m": 1_800_000,
+  "1h": 3_600_000,
+  "2h": 7_200_000,
+  off: null,
+};
 
 export const MEMO_DRAG_MIME = "application/x-edgeever-memos";
 export const NOTEBOOK_DRAG_MIME = "application/x-edgeever-notebook";
@@ -167,9 +161,10 @@ export const getMemoSortOptions = (t: TFunction): Array<{ value: MemoSortMode; l
   { value: "title-asc", label: t("options.memoSort.titleAsc") },
 ];
 
-const NOTEBOOK_SORT_VALUES: NotebookSortMode[] = ["name-asc", "memo-count-desc", "updated-desc"];
+const NOTEBOOK_SORT_VALUES: NotebookSortMode[] = ["custom", "name-asc", "memo-count-desc", "updated-desc"];
 
 export const getNotebookSortOptions = (t: TFunction): Array<{ value: NotebookSortMode; label: string }> => [
+  { value: "custom", label: t("options.notebookSort.custom") },
   { value: "name-asc", label: t("options.notebookSort.nameAsc") },
   { value: "memo-count-desc", label: t("options.notebookSort.memoCountDesc") },
   { value: "updated-desc", label: t("options.notebookSort.updatedDesc") },
@@ -201,9 +196,54 @@ export const getShortcutActionOptions = (
     description: t("shortcuts.actions.focusSearch.description"),
   },
   {
+    value: "focusGlobalSearch",
+    label: t("shortcuts.actions.focusGlobalSearch.label"),
+    description: t("shortcuts.actions.focusGlobalSearch.description"),
+  },
+  {
     value: "focusReplace",
     label: t("shortcuts.actions.focusReplace.label"),
     description: t("shortcuts.actions.focusReplace.description"),
+  },
+  {
+    value: "openQuickSwitcher",
+    label: t("shortcuts.actions.openQuickSwitcher.label"),
+    description: t("shortcuts.actions.openQuickSwitcher.description"),
+  },
+  {
+    value: "openPreviousMemo",
+    label: t("shortcuts.actions.openPreviousMemo.label"),
+    description: t("shortcuts.actions.openPreviousMemo.description"),
+  },
+  {
+    value: "openNextMemo",
+    label: t("shortcuts.actions.openNextMemo.label"),
+    description: t("shortcuts.actions.openNextMemo.description"),
+  },
+  {
+    value: "openAiAssistant",
+    label: t("shortcuts.actions.openAiAssistant.label"),
+    description: t("shortcuts.actions.openAiAssistant.description"),
+  },
+  {
+    value: "saveAndSync",
+    label: t("shortcuts.actions.saveAndSync.label"),
+    description: t("shortcuts.actions.saveAndSync.description"),
+  },
+  {
+    value: "toggleReadingProtection",
+    label: t("shortcuts.actions.toggleReadingProtection.label"),
+    description: t("shortcuts.actions.toggleReadingProtection.description"),
+  },
+  {
+    value: "toggleEditorMode",
+    label: t("shortcuts.actions.toggleEditorMode.label"),
+    description: t("shortcuts.actions.toggleEditorMode.description"),
+  },
+  {
+    value: "toggleOutline",
+    label: t("shortcuts.actions.toggleOutline.label"),
+    description: t("shortcuts.actions.toggleOutline.description"),
   },
 ];
 
@@ -211,10 +251,49 @@ export const DEFAULT_SHORTCUT_SETTINGS: ShortcutSettings = {
   createMemo: { key: "n", ctrlOrMeta: true, shift: false, alt: false },
   createNotebook: { key: "n", ctrlOrMeta: true, shift: true, alt: false },
   focusSearch: { key: "f", ctrlOrMeta: true, shift: false, alt: false },
+  focusGlobalSearch: { key: "f", ctrlOrMeta: true, shift: true, alt: false },
   focusReplace: { key: "h", ctrlOrMeta: true, shift: false, alt: false },
+  openQuickSwitcher: { key: "o", ctrlOrMeta: true, shift: false, alt: false },
+  openPreviousMemo: { key: "[", ctrlOrMeta: true, shift: false, alt: false },
+  openNextMemo: { key: "]", ctrlOrMeta: true, shift: false, alt: false },
+  openAiAssistant: { key: "j", ctrlOrMeta: true, shift: false, alt: false },
+  saveAndSync: { key: "s", ctrlOrMeta: true, shift: false, alt: false },
+  toggleReadingProtection: { key: "e", ctrlOrMeta: true, shift: false, alt: false },
+  toggleEditorMode: { key: "/", ctrlOrMeta: true, shift: false, alt: false },
+  toggleOutline: { key: "1", ctrlOrMeta: true, shift: true, alt: false },
 };
 
-const SHORTCUT_ACTION_VALUES: ShortcutAction[] = ["createMemo", "createNotebook", "focusSearch", "focusReplace"];
+const LEGACY_READING_PROTECTION_SHORTCUT: ShortcutBinding = {
+  key: "l",
+  ctrlOrMeta: true,
+  shift: true,
+  alt: false,
+};
+
+const SHORTCUT_ALIASES: Partial<Record<ShortcutAction, ShortcutBinding[]>> = {
+  focusReplace: [{ key: "h", ctrlOrMeta: true, shift: true, alt: false }],
+};
+
+const SHORTCUT_ACTION_VALUES: ShortcutAction[] = [
+  "createMemo",
+  "createNotebook",
+  "focusSearch",
+  "focusGlobalSearch",
+  "focusReplace",
+  "openQuickSwitcher",
+  "openPreviousMemo",
+  "openNextMemo",
+  "openAiAssistant",
+  "saveAndSync",
+  "toggleReadingProtection",
+  "toggleEditorMode",
+  "toggleOutline",
+];
+
+export const isDefaultMemoTitle = (title: string | null | undefined) => title?.trim() === DEFAULT_MEMO_TITLE;
+
+export const getEditableMemoTitle = (title: string | null | undefined) =>
+  isDefaultMemoTitle(title) ? "" : title?.trim() || "";
 
 export const getMemoTitle = (title: string | null | undefined) => title?.trim() || DEFAULT_MEMO_TITLE;
 
@@ -250,6 +329,77 @@ export const readImageCompressionPreference = () => {
 export const writeImageCompressionPreference = (enabled: boolean) => {
   try {
     window.localStorage.setItem(IMAGE_COMPRESSION_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readSyncIntervalPreference = (): number | null => {
+  try {
+    const stored = (
+      window.localStorage.getItem(SYNC_INTERVAL_STORAGE_KEY)
+      ?? window.localStorage.getItem(LEGACY_AUTO_SAVE_INTERVAL_STORAGE_KEY)
+    );
+    const preference = stored === "1m" ? "30s" : stored;
+    return preference && preference in SYNC_INTERVAL_VALUES
+      ? SYNC_INTERVAL_VALUES[preference as SyncIntervalPreference]
+      : DEFAULT_SYNC_INTERVAL_MS;
+  } catch {
+    return DEFAULT_SYNC_INTERVAL_MS;
+  }
+};
+
+export const writeSyncIntervalPreference = (preference: SyncIntervalPreference) => {
+  try {
+    window.localStorage.setItem(SYNC_INTERVAL_STORAGE_KEY, preference);
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readDesktopFocusModePreference = () => {
+  try {
+    return window.localStorage.getItem(DESKTOP_FOCUS_MODE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+
+export const writeDesktopFocusModePreference = (enabled: boolean) => {
+  try {
+    window.localStorage.setItem(DESKTOP_FOCUS_MODE_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readDesktopReadingProtectionPreference = () => {
+  try {
+    return window.localStorage.getItem(DESKTOP_READING_PROTECTION_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+};
+
+export const writeDesktopReadingProtectionPreference = (enabled: boolean) => {
+  try {
+    window.localStorage.setItem(DESKTOP_READING_PROTECTION_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Local storage can be unavailable in private or restricted browser contexts.
+  }
+};
+
+export const readEditorContentAlignmentPreference = (): EditorContentAlignment => {
+  try {
+    return window.localStorage.getItem(EDITOR_CONTENT_ALIGNMENT_STORAGE_KEY) === "center" ? "center" : "start";
+  } catch {
+    return "start";
+  }
+};
+
+export const writeEditorContentAlignmentPreference = (alignment: EditorContentAlignment) => {
+  try {
+    window.localStorage.setItem(EDITOR_CONTENT_ALIGNMENT_STORAGE_KEY, alignment);
   } catch {
     // Local storage can be unavailable in private or restricted browser contexts.
   }
@@ -337,15 +487,18 @@ export const readShortcutSettingsPreference = (): ShortcutSettings => {
     }
 
     const parsedValue = JSON.parse(rawValue) as Partial<ShortcutSettings>;
-    return SHORTCUT_ACTION_VALUES.reduce<ShortcutSettings>(
-      (settings, action) => ({
-        ...settings,
-        [action]: isShortcutBinding(parsedValue[action])
-          ? { ...parsedValue[action], key: normalizeShortcutKey(parsedValue[action].key) }
-          : DEFAULT_SHORTCUT_SETTINGS[action],
-      }),
-      { ...DEFAULT_SHORTCUT_SETTINGS }
-    );
+    return SHORTCUT_ACTION_VALUES.reduce<ShortcutSettings>((settings, action) => {
+      const storedBinding = parsedValue[action];
+      const normalizedBinding = isShortcutBinding(storedBinding)
+        ? { ...storedBinding, key: normalizeShortcutKey(storedBinding.key) }
+        : DEFAULT_SHORTCUT_SETTINGS[action];
+      const binding = action === "toggleReadingProtection"
+        && shortcutBindingsEqual(normalizedBinding, LEGACY_READING_PROTECTION_SHORTCUT)
+          ? DEFAULT_SHORTCUT_SETTINGS.toggleReadingProtection
+          : normalizedBinding;
+
+      return { ...settings, [action]: binding };
+    }, { ...DEFAULT_SHORTCUT_SETTINGS });
   } catch {
     return DEFAULT_SHORTCUT_SETTINGS;
   }
@@ -372,7 +525,8 @@ export const formatShortcutBinding = (binding: ShortcutBinding) => {
 };
 
 export const shortcutBindingFromKeyboardEvent = (event: KeyboardEvent): ShortcutBinding | null => {
-  const key = normalizeShortcutKey(event.key);
+  const digitKey = typeof event.code === "string" ? /^Digit([0-9])$/.exec(event.code)?.[1] : undefined;
+  const key = digitKey ?? normalizeShortcutKey(event.key);
 
   if (["control", "meta", "shift", "alt", "escape"].includes(key)) {
     return null;
@@ -403,7 +557,10 @@ export const getShortcutActionForEvent = (event: KeyboardEvent, settings: Shortc
     return null;
   }
 
-  return SHORTCUT_ACTION_VALUES.find((action) => shortcutBindingsEqual(settings[action], eventBinding)) ?? null;
+  return SHORTCUT_ACTION_VALUES.find((action) =>
+    shortcutBindingsEqual(settings[action], eventBinding) ||
+    (SHORTCUT_ALIASES[action] ?? []).some((binding) => shortcutBindingsEqual(binding, eventBinding))
+  ) ?? null;
 };
 
 export const compareDateDesc = (first: string, second: string) => {
@@ -434,6 +591,10 @@ const compareNotebookUpdatedDesc = (first: Notebook, second: Notebook) => {
 };
 
 export const getNotebookSortComparator = (sortMode: NotebookSortMode): NotebookNodeComparator => {
+  if (sortMode === "custom") {
+    return (first, second) => first.sortOrder - second.sortOrder || compareNotebookNameAsc(first, second);
+  }
+
   if (sortMode === "memo-count-desc") {
     return (first, second) => second.memoCount - first.memoCount || compareNotebookNameAsc(first, second);
   }
@@ -506,18 +667,6 @@ export const getNotebookMoveOptions = (notebooks: Notebook[]) => {
 
   walk(buildNotebookTree(notebooks), 0);
   return options;
-};
-
-export const toggleMemoSelection = (current: Set<string>, memoId: string) => {
-  const next = new Set(current);
-
-  if (next.has(memoId)) {
-    next.delete(memoId);
-  } else {
-    next.add(memoId);
-  }
-
-  return next;
 };
 
 export const hasMemoDragData = (dataTransfer: DataTransfer) => Array.from(dataTransfer.types).includes(MEMO_DRAG_MIME);

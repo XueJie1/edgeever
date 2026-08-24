@@ -1,82 +1,85 @@
-# Cloudflare Manual Deployment Guide
+# Cloudflare Manual Deployment and Recovery
 
-If you are comfortable with Cloudflare and the command line, or prefer customized control over first installation and resource setup, follow this guide for manual deployment. Cloudflare Workers Builds handles routine updates; local deployment is only for first installation and emergency recovery.
+Use this page for advanced configuration, troubleshooting, and emergency recovery. Most users should use [Deploy EdgeEver online from a Fork](deploy-cloudflare-button.md); AI Agents should use [AI Agent Cloudflare Deployment](agent-deploy-cloudflare.md).
 
-> 💡 **Tip**: If you are deploying using an AI assistant (such as Claude Code, Codex, Antigravity, Cursor, or Trae), the agent should follow the [AI Agent Cloudflare Deployment](https://github.com/tianma-if/edgeever/blob/main/docs/agent-deploy-cloudflare.md) runbook.
+## First manual deployment
 
-## Deployment Steps
+1. Fork the repository and clone it locally.
+2. Install Node.js 22+ and Bun.
+3. Initialize configuration and Cloudflare resources:
 
-1. **Fork the official repository**:
-   Visit and fork the official repository: [https://github.com/tianma-if/edgeever](https://github.com/tianma-if/edgeever)
-
-2. **Clone your fork**:
    ```sh
-   git clone <your fork repository URL>
-   cd edgeever
-   ```
-
-3. **Deploy with the automated helper commands**:
-   ```sh
-   # Copy the configuration template
    cp .env.local.example .env.local
-
-   # Install dependencies
    bun install
-
-   # Initialize deployment resources with the default admin / admin123 login
-   bun run deploy:setup
-
-   # Check the deployment environment and configurations
+   EDGE_EVER_PASSWORD='<initial password>' bun run deploy:setup
    bun run deploy:doctor
-
-   # Deploy to Cloudflare
-   bun run deploy
+   bun run deploy:manual
    ```
 
-   To use a custom first-login password, run `EDGE_EVER_PASSWORD='<your password>' bun run deploy:setup` instead. You can also change the password later in Personal Settings.
+`deploy:setup` creates or reuses D1 and R2 and writes configuration to the git-ignored `.env.local`. `EDGE_EVER_PASSWORD` is required for a new deployment; there is no default production password.
 
-### Creating Cloudflare Resources Manually
+For local CLI deployment, set `EDGE_EVER_DEPLOYMENT_URL=https://<your-worker-domain>` in `.env.local` to include the live `/api/health` request in deployment verification. CI deployments discover the public URL automatically from Wrangler output. Without an explicit URL, local verification still checks the remote D1 schema and Worker Secret, then reports that the live health check was skipped.
 
-If you prefer not to use the automated `deploy:setup` helper, you can create the resources manually using Cloudflare CLI (Wrangler):
+After deployment, confirm:
+
+- `/api/health` returns `200` with `"ok": true`
+- `/api/openapi.json` is reachable
+- `admin` can log in with the password supplied through `EDGE_EVER_PASSWORD`
+
+## Create resources manually
 
 ```sh
-# Copy configuration template and install dependencies
 cp .env.local.example .env.local
 bun install
-
-# Create the D1 database
 bunx wrangler d1 create edgeever
-
-# Create the R2 bucket
 bunx wrangler r2 bucket create edgeever-resources
-
-# Edit .env.local and fill in at least the generated resource values
-# EDGE_EVER_D1_DATABASE_ID=<database_id returned by the D1 command>
-# EDGE_EVER_R2_BUCKET_NAME=edgeever-resources
-# EDGE_EVER_AUTH_PASSWORD=admin123
-# EDGE_EVER_SESSION_TTL_DAYS=400
-
-# Validate the completed configuration before deploying
-bun run deploy:doctor
-bun run deploy
 ```
 
-Before running `bun run deploy`, copy the D1 `database_id` and R2 bucket name into your local `.env.local` file. The template uses `admin` / `admin123` for the initial login; edit `EDGE_EVER_AUTH_PASSWORD` if you prefer another initial password. Keep the session lifetime at the template default of `400` days; the server also caps larger values at 400 days.
+Write the returned D1 ID and resource names to `.env.local`:
 
-`bun run deploy` builds the web app, applies remote D1 migrations, deploys the Worker, and uploads `EDGE_EVER_AUTH_PASSWORD` as a Worker Secret. After the first successful login, EdgeEver stores a salted PBKDF2-SHA256 hash in D1. Existing installations may continue to use `EDGE_EVER_AUTH_PASSWORD_HASH`; when both Secrets are set, the hash takes precedence. Verify the deployment by signing in with `EDGE_EVER_AUTH_USERNAME` and the configured password.
+```text
+EDGE_EVER_D1_DATABASE_ID=<database_id>
+EDGE_EVER_R2_BUCKET_NAME=edgeever-resources
+EDGE_EVER_AUTH_USERNAME=admin
+EDGE_EVER_AUTH_PASSWORD=<strong password>
+EDGE_EVER_SESSION_TTL_DAYS=400
+# Optional portable application-level login protection. These also work with Docker + SQLite.
+EDGE_EVER_AUTH_LOGIN_WINDOW_SECONDS=900
+EDGE_EVER_AUTH_LOGIN_USERNAME_MAX_ATTEMPTS=5
+EDGE_EVER_AUTH_LOGIN_USERNAME_COOLDOWN_SECONDS=900
+EDGE_EVER_AUTH_LOGIN_IP_MAX_ATTEMPTS=30
+EDGE_EVER_AUTH_LOGIN_IP_COOLDOWN_SECONDS=300
+```
 
-Existing installations do not need to migrate. If you intentionally switch from the hash setting to `EDGE_EVER_AUTH_PASSWORD`, remove the old `EDGE_EVER_AUTH_PASSWORD_HASH` from `.env.local`, Workers Builds, and the Worker's runtime Secrets; otherwise the legacy hash remains authoritative.
-
----
-
-## Enable Automatic Updates
-
-After the first deployment, connect the Worker to the fork's `main` branch. Cloudflare Workers Builds is the standard production deployment path for every EdgeEver instance. Follow [Cloudflare Workers Builds](cloudflare-workers-builds.md) to create the configuration-only **User API Token** (not an Account API Token), save it privately as `EDGE_EVER_BUILDS_API_TOKEN` in `.env.local`, then run:
+Then run:
 
 ```sh
-bun run deploy:builds:setup
+bun run deploy:doctor
+bun run deploy:manual
 ```
 
-The command configures the Git repository connection, production trigger, build variables, and the deployment token needed for D1 migrations. Afterwards, use **Sync fork** or push to `main`; Cloudflare automatically builds the web app, applies new remote D1 migrations, and deploys the Worker. No GitHub Actions secrets or local redeployment are required.
+Do not commit `.env.local` or write passwords to D1.
 
-Keep `bun run deploy` available for first installation and emergency recovery.
+## Enable third-party OSS settings
+
+To configure an S3-compatible object store from **Settings → Advanced**, add a stable encryption secret to the deployed Worker:
+
+```sh
+bunx wrangler secret put EDGE_EVER_STORAGE_ENCRYPTION_KEY
+```
+
+Use a random value of at least 32 characters and keep a secure backup. EdgeEver encrypts the external Secret Access Key before storing it in D1. Losing or changing this encryption key makes previously saved external credentials unusable. After adding the secret, redeploy or restart the Worker, then use **Test connection** before saving the OSS configuration. Personal AI model credentials use the existing instance authentication secret automatically and do not require this variable.
+
+## Recovery
+
+- Database not ready: confirm the D1 binding is `DB`, then run `bun run deploy:manual`.
+- Authentication not configured: set `EDGE_EVER_AUTH_PASSWORD` in `.env.local`, then redeploy.
+- Forgotten admin password:
+
+  ```sh
+  EDGE_EVER_PASSWORD='<new password>' bun run auth:reset-password -- --remote --username admin
+  ```
+
+## Automatic updates
+
+After manual deployment, configure [Cloudflare Workers Builds](cloudflare-workers-builds.md) and enable **Update deployed EdgeEver** in the Fork's **Actions**.

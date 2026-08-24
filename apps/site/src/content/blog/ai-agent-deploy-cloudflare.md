@@ -1,10 +1,10 @@
 ---
 draft: false
-title: "AI Agent 一句话部署 EdgeEver 运行指南"
-snippet: "把 EdgeEver Fork 仓库链接交给 AI Agent，并按核心仓库部署协议安装到 Cloudflare，含免费额度与绑定 Visa 卡提醒。"
+title: "EdgeEver Cloudflare 部署指南：两种方案任选其一"
+snippet: "推荐使用 AI Agent 在线部署，也可从 GitHub Fork 后手动完成 Cloudflare 配置。"
 image: {
     src: "/images/agent-deploy.jpg",
-    alt: "AI Agent 部署 EdgeEver 到 Cloudflare"
+    alt: "EdgeEver 的两种 Cloudflare 部署方案"
 }
 publishDate: "2026-07-02 00:50"
 category: "Deployment"

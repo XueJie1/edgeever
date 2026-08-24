@@ -1,15 +1,14 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const MEMO_LIST_DENSITY_KEY = "edgeever.mobile.memoListDensity";
-const NOTEBOOK_SORT_KEY = "edgeever.mobile.notebookSort";
 const IMAGE_COMPRESSION_KEY = "edgeever.mobile.imageCompressionEnabled";
 const LOCALE_PREFERENCE_KEY = "edgeever.mobile.localePreference";
-const RESOURCE_LAYOUT_KEY = "edgeever.mobile.resourceLayout";
+const THEME_PREFERENCE_KEY = "edgeever.mobile.themePreference";
+const UPDATE_TOAST_DISMISSED_VERSION_KEY = "edgeever.mobile.updateToastDismissedVersion";
 
 export type MobileMemoListDensity = "preview" | "compact";
-export type MobileNotebookSortPreference = "manual" | "name-asc" | "memo-count-desc" | "updated-desc";
 export type MobileLocalePreference = "system" | "zh-CN" | "en-US";
-export type MobileResourceLayoutPreference = "grid" | "list";
+export type MobileThemePreference = "system" | "light" | "dark";
 
 export const readMobileMemoListDensity = async (): Promise<MobileMemoListDensity> => {
   const value = await AsyncStorage.getItem(MEMO_LIST_DENSITY_KEY);
@@ -17,13 +16,6 @@ export const readMobileMemoListDensity = async (): Promise<MobileMemoListDensity
 };
 
 export const writeMobileMemoListDensity = (density: MobileMemoListDensity) => AsyncStorage.setItem(MEMO_LIST_DENSITY_KEY, density);
-
-export const readMobileNotebookSort = async (): Promise<MobileNotebookSortPreference> => {
-  const value = await AsyncStorage.getItem(NOTEBOOK_SORT_KEY);
-  return isMobileNotebookSortPreference(value) ? value : "manual";
-};
-
-export const writeMobileNotebookSort = (sortMode: MobileNotebookSortPreference) => AsyncStorage.setItem(NOTEBOOK_SORT_KEY, sortMode);
 
 export const readMobileImageCompressionEnabled = async () => {
   const value = await AsyncStorage.getItem(IMAGE_COMPRESSION_KEY);
@@ -39,14 +31,23 @@ export const readMobileLocalePreference = async (): Promise<MobileLocalePreferen
 
 export const writeMobileLocalePreference = (locale: MobileLocalePreference) => AsyncStorage.setItem(LOCALE_PREFERENCE_KEY, locale);
 
-export const readMobileResourceLayout = async (): Promise<MobileResourceLayoutPreference> => {
-  const value = await AsyncStorage.getItem(RESOURCE_LAYOUT_KEY);
-  return value === "list" ? "list" : "grid";
+export const readMobileThemePreference = async (): Promise<MobileThemePreference> => {
+  const value = await AsyncStorage.getItem(THEME_PREFERENCE_KEY);
+  return value === "light" || value === "dark" || value === "system" ? value : "system";
 };
 
-export const writeMobileResourceLayout = (layout: MobileResourceLayoutPreference) => AsyncStorage.setItem(RESOURCE_LAYOUT_KEY, layout);
+export const writeMobileThemePreference = (theme: MobileThemePreference) => AsyncStorage.setItem(THEME_PREFERENCE_KEY, theme);
 
-const isMobileNotebookSortPreference = (value: unknown): value is MobileNotebookSortPreference =>
-  value === "manual" || value === "name-asc" || value === "memo-count-desc" || value === "updated-desc";
+/** Installed app version for which the update toast was already shown (until the user upgrades). */
+export const readMobileUpdateToastDismissedVersion = async () => AsyncStorage.getItem(UPDATE_TOAST_DISMISSED_VERSION_KEY);
+
+export const writeMobileUpdateToastDismissedVersion = (installedVersion: string) =>
+  AsyncStorage.setItem(UPDATE_TOAST_DISMISSED_VERSION_KEY, installedVersion);
+
+/** Show the toast only once per installed version while a newer package is available. */
+export const shouldShowMobileUpdateToastForVersion = (
+  installedVersion: string | null | undefined,
+  dismissedForVersion: string | null | undefined
+) => Boolean(installedVersion) && dismissedForVersion !== installedVersion;
 
 const isMobileLocalePreference = (value: unknown): value is MobileLocalePreference => value === "system" || value === "zh-CN" || value === "en-US";

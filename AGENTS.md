@@ -1,49 +1,56 @@
 # AGENTS.md
 
-本文件用于约束和指导参与本项目的 AI 代理与协作者。除非用户明确给出更高优先级的指令，否则应遵守以下规则。
+本文件用于约束和指导参与本项目的 AI 代理与协作者。
 
-## 项目背景与技术栈
+## 文档与分支约束
 
-涉及本项目的背景、定位、部署信息与技术栈说明时，请优先参考 `README.md`。
+- **技术栈与背景**：优先参考 `README.md`。
+- **移动端平台边界**：Android 客户端位于 `apps/mobile`，使用 Expo / React Native 实现；iOS 客户端位于 `apps/ios`，使用 Swift / SwiftUI 原生实现。
+- **双语同步**：修改中文文档时必须同步更新对应的英文文档。
+- **分支规范**：严禁创建新分支，所有修改与提交必须直接在 `main` 分支上完成。
 
-## Git 分支约束
+## GitHub Actions 与 Release 约束及流程
 
-严禁创建新的 Git 分支；所有修改、提交和推送都必须直接在 `main` 分支上完成。
-
-## GitHub Issue 与 Release 约束
-
-正式版本遵循 Semantic Versioning。发布前检查最新 Release 和远端标签，选择未使用的版本号。Git 标签与 Release 标题必须完全一致，格式为 `vX.Y.Z`。
-
-Release 标签必须指向 `main` 上经过验证的发布提交；默认发布为非 Draft、非 Prerelease。发布正文使用以下结构：
+1. **Fork 工作流边界**：配置 GitHub Actions 时必须考虑大量用户会 Fork 仓库进行自部署；仅官方仓库需要的 Job 必须使用 `github.repository == 'tianma-if/edgeever'` 门禁，严禁在下游 Fork 中分配 Runner 或执行。
+2. **版本号与基线**：`vX.Y.Z`（非 Draft/Prerelease）。发布须显式 `--bump patch|minor|major`（脚本不自动选级）；按 SemVer 选择，**禁止因发版节奏把用户可感知的新能力或新平台压成 patch**。递增根目录 `package.json`；含移动端修改时同步 `apps/mobile/app.json` 的 `expo.version` 并递增 `android.versionCode`。上一个正式 Release 为审计基线。
+3. **跨平台 Release 资产**：每个正式 Release 页面必须同时包含 macOS arm64 DMG、macOS x64 DMG 和 Android arm64 APK。若本次未修改对应原生运行时代码、依赖、配置或构建工具，直接复用上一个正式 Release 中已验证的原始资产，保留原文件名与校验和，禁止仅为匹配新版本号而重命名。
+4. **验证命令**：必须通过 `bun run typecheck`、`bun run typecheck:mobile` 和 `bun run build:web`。
+5. **测试职责边界**：正式 Release 必须先在官方仓库及与下游一致的 Ubuntu 环境通过完整非 E2E 测试，严禁将上游自身的测试失败转嫁给下游 Fork 发现。只读部署 Fork 仅同步产品快照且不运行测试；只有显式保留定制改动的 Fork 才验证合并结果，失败时必须保持 `main` 与生产环境不变。
+6. **原生资产构建与复用**：由 `scripts/plan-native-release.mjs` 决定重建或复用；桌面资产包含 `apps/web`。修改判定规则时同步更新测试。移动端重建使用 `bun run build:android:apk:local`，签名配置保存在仓库外。
+7. **Draft 内准备资产**：通过带 `release_tag` 的 `workflow_dispatch` 在 Draft 中准备并验证资产；`published` 事件只审计，禁止重新构建或上传。
+8. **桌面验证职责**：桌面 Release 工作流负责测试、包结构检查、签名与公证；代理不再重复下载 Draft 或执行本地首次启动验收，除非用户明确要求。
+9. **发布后更新**：正式发布后，发布流程默认不得下载、覆盖安装或启动 `/Applications/EdgeEver.app`；已安装的桌面端通过应用内自动更新机制获取新版。仅在用户明确要求时使用 `--install-desktop` 执行原有安装验收，功能体验由用户在实际使用中验证。
+10. **失败处理**：工作流或资产审计失败时保持或恢复 Draft，修复后重跑；不得公开已知损坏的 Release。
+11. **Release 说明结构**：使用中英文双语格式（正文禁止包含字面量 `\n`），只写用户可感知的变化、影响以及必要的升级或迁移提醒。类型检查、构建命令、签名、公证、资产复用等技术验证细节保留在 Actions 和关联 Issue 中，不写入公开 Release 正文。功能/修复关联对应 Issue 并标记 Label，发布后回链并关闭 Issue。正文结构：
 
 ```md
+## 🇨🇳 中文说明 / Chinese Changelog
+
 ## 主要更新
 
 - 面向用户说明本次变化及影响。
 
 关联 Issue：#<issue-number>
 
-## 验证
+## Key Changes
 
-- 列出实际完成的测试、类型检查和构建结果。
+- User-facing summary of changes in English.
+
+Related Issue: #<issue-number>
 ```
 
-每个功能或修复 Release 必须关联带有对应 Label 的 GitHub Issue；没有 Issue 时先创建。发布后在 Issue 中回链 Release，并按完成状态关闭。验证失败时不得发布正式 Release。
+## 环境、部署与组件约束
 
-## Cloudflare 自动部署约束
+- **Cloudflare 部署**：严格按 `docs/agent-deploy-cloudflare.md` 执行。
+- **跨运行时架构**：项目未来将正式支持 Docker 自托管；实现新功能时必须保持业务逻辑与 Cloudflare 解耦，并为其他运行时预留扩展边界。Cloudflare 与 Docker 必须共用同一套业务代码，仅允许保留薄且稳定、不包含业务判断的运行入口和基础设施驱动适配器。
+- **数据库 Migration**：数据库或种子变化时，在 `migrations/` 下新增递增编号 SQL，禁止修改已执行的旧 Migration。
+- **本地启动**：默认 `bun run dev`（纯本地环境）；指定远程实例用 `EDGE_EVER_INSTANCE=<实例名> bun run dev:remote`；纯前端用 `bun run dev:web`。
+- **Demo 示例同步**：修改示例笔记后，在 `main` 分支干净状态下执行 `bun run demo:sync` 重置公开 Demo。
+- **禁止重复造轮子**：严禁重复实现已有成熟方案；优先采用维护活跃、广泛验证的开源组件与依赖，并优先复用 `shadcn/ui`；复杂或重复模块封装为独立组件。
+- UI和交互的原则是，产品始终表现得可靠、可预测、确定、被接住。
+- **悬停提示**：所有悬停或聚焦提示严禁使用 HTML 原生 `title`；Web 端必须统一使用 shadcn/ui 的 Tooltip 组件，并确保键盘聚焦时同样可见。
 
-当用户要求根据 GitHub 项目链接将本项目安装部署到 Cloudflare 时，必须先完整阅读并严格按照 `docs/agent-deploy-cloudflare.md` 执行。该文档是此部署流程的唯一操作规范；不要在本文件重复维护部署命令、密码配置或 Workers Builds 步骤。
+## 品牌视觉规范 / Brand Identity
 
-## 本地启动约束
-
-本地预览或调试时，必须优先使用 `bun run dev` 启动完整的纯本地开发环境。该命令使用本地 D1/R2 和固定演示种子，不得读取或连接 `.env.local` 中的远程个性化实例。
-
-只有用户明确要求连接远程实例时，才能使用 `EDGE_EVER_INSTANCE=<实例名> bun run dev:remote`。实例名称、D1/R2 资源、账号等本机私有配置均以 `.env.local` 为准，严禁在代理指令或代码中硬编码个人实例名；禁止在未显式指定实例的情况下启动远程开发环境。
-
-除非用户明确要求只启动前端静态界面，否则不要单独运行 `bun run dev:web`；该命令不会启动 API，容易导致前端请求 `127.0.0.1:8787` 失败或误判环境。
-
-## 组件复用与造轮子约束
-
-UI 功能应尽量复用 `shadcn/ui` 等现有 UI 组件。在实现其他功能时，也应优先采用成熟、稳定的开源组件或库，绝对禁止在没有充分必要性的前提下自行从零造轮子。
-
-为方便代码维护，当页面或功能模块出现复杂结构、重复布局或潜在复用场景时，应视情况封装为独立组件，保持页面入口聚焦于组合与数据传递。
+- **品牌色**：主绿色 `#16A06E`，Logo 图形色 `#07130B`。
+- 修改 Logo 后执行 `bun run prepare:brand:icons` 同步各平台资源。

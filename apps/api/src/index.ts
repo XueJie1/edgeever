@@ -4,28 +4,17 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
-  ApiTokenCreateSchema,
-  ChangePasswordSchema,
-  DeleteMemosSchema,
-  LoginSchema,
   markdownToDoc,
+  mergeMemoDocs,
+  resolveMemoContentDoc,
+  resolveMergedMemoTitle,
   isSuspiciousMemoOverwrite,
   isMemoEditBindingValid,
-  JsonBackupResourceMetadataSchema,
-  MemoCreateSchema,
-  MemoUpdateSchema,
-  MergeMemosSchema,
-  MoveMemosSchema,
   normalizeTags,
-  TagRenameSchema,
-  UserCreateSchema,
-  UserUpdateSchema,
-  NotebookCreateSchema,
-  NotebookUpdateSchema,
-  RestoreJsonMemosSchema,
-  RestoreJsonNotebooksSchema,
-  type ApiToken,
-  type CreatedApiToken,
+  AiPromptTemplateCreateSchema,
+  AiPromptTemplateUpdateSchema,
+  TemplateCreateSchema,
+  TemplateUpdateSchema,
   type MemoDetail,
   type MemoEditSession,
   type MemoRevision,
@@ -33,98 +22,162 @@ import {
   type MemoUpdateInput,
   type JsonBackupMemo,
   type JsonBackupNotebook,
-  type JsonBackupResource,
-  type JsonBackupRevision,
-  type Notebook,
-  type NotebookCreateInput,
   type Resource,
-  type ResourceListItem,
-  type ResourceStorageSummary,
-  type TagSummary,
   type TiptapDoc,
-  type InstanceUser,
 } from "@edgeever/shared";
-import { zValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { getCookie, setCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import openApiSpec from "../../../docs/openapi.json";
-import { hasBootstrapCredential, verifyBootstrapPassword } from "./auth-bootstrap";
-import { isDemoModeEnabled, resolveDemoPasswordHash, shouldUpsertDemoSeedRecord } from "./demo-mode";
+import releaseSummary from "../../../release-summary.json";
+import { hasBootstrapCredential, isSupportedPasswordHash, verifyBootstrapPassword } from "./auth-bootstrap";
+import {
+  isDatabaseNotReadyError,
+  isUnauthenticatedAccessEnabled,
+  resolveInstanceAuthMode,
+  type InstanceAuthMode,
+} from "./auth-state";
+import {
+  isDemoModeEnabled,
+  resolveDemoPasswordHash,
+  shouldUpsertDemoSeedRecord,
+} from "./demo-mode";
+import {
+  resolveSessionDeviceId,
+} from "./auth-session-devices";
+import {
+  type LoginAttemptKey,
+} from "./auth-login-limiter";
+import {
+  decodeDemoAttachment,
+  DEMO_SEED_ATTACHMENT_RESOURCES,
+  DEMO_SEED_MEMO_IDS,
+  DEMO_SEED_MEMOS,
+  DEMO_SEED_NOTEBOOK_IDS,
+  DEMO_SEED_NOTEBOOKS,
+  DEMO_SEED_REVISIONS,
+} from "./demo-seed-data";
+import { createCloudflareStorageAdapter } from "./cloudflare-storage-adapter";
+import type {
+  DatabaseAdapter,
+  PreparedStatementAdapter,
+} from "./storage-contract";
+import type { AppContext, AppEnv, AuditActor, AuthContext, Bindings, WorkerBindings } from "./api-context";
+import { AppError } from "./app-error";
+import { hashPassword, randomToken, SESSION_TOKEN_BYTES, verifyPassword } from "./auth-crypto";
+import {
+  apiError,
+  authNotConfigured,
+  databaseNotReady,
+  forbidden,
+  notFound,
+  unauthorized,
+} from "./http-errors";
+import {
+  decodeBase64Data,
+  escapeMarkdownImageAlt,
+  escapeMarkdownLinkLabel,
+  getOptionalString,
+  getOptionalStringArray,
+  getRequiredString,
+  getRequiredStringArray,
+} from "./mcp-json-rpc";
+import { audit, auditStatement } from "./audit";
+import { createId, isoNow, parseJsonArray } from "./entity-utils";
+import {
+  deleteMemoSearchDocumentsStatement,
+  upsertMemoSearchDocumentStatement,
+} from "./memo-search-index";
+import {
+  createNotebookRecord,
+  findNotebooks,
+  getNotebook,
+  listNotebooks,
+  mapNotebook,
+  notebookSelectSql,
+  resolveNotebookPath,
+  updateNotebookRecord,
+  type NotebookRow,
+} from "./notebook-service";
+import {
+  listTagSummaries,
+  previewTagRename,
+  updateTagAcrossMemos,
+  updateTagsForMemos,
+} from "./tag-service";
+import {
+  assertScope,
+  getActorLabel,
+  getAuditActor,
+  getWorkspaceId,
+  hasScopes,
+  requireOwner,
+  requireScopes,
+  requireUser,
+  type TokenScope,
+} from "./request-auth";
+import { registerTagRoutes } from "./tag-routes";
+import { getMemoTemplate, listMemoTemplates, registerTemplateRoutes } from "./template-routes";
+import { registerAuthRoutes, type UserRow } from "./auth-routes";
+import { registerApiTokenRoutes, type ApiTokenRow } from "./api-token-routes";
+import { registerObjectStorageRoutes } from "./object-storage-routes";
+import { registerAiRoutes } from "./ai-routes";
+import { registerAiPromptRoutes } from "./ai-prompt-routes";
+import {
+  getAiPromptTemplateRow,
+  listAiPromptTemplates,
+  mapAiPromptTemplateRow,
+} from "./ai-prompt-service";
+import { restoreMissingDefaultAiPrompts } from "./ai-prompt-seed";
+import { registerResourceRoutes } from "./resource-routes";
+import { registerPluginDistributionRoutes } from "./plugin-distribution-routes";
+import { registerSyncRoutes } from "./sync-routes";
+import { registerMemoRoutes } from "./memo-routes";
+import { registerBackupRoutes } from "./backup-routes";
+import { registerMcpRoutes } from "./mcp-routes";
+import {
+  escapeLike,
+  listMemos,
+  mapMemoSummary,
+  toFtsQuery,
+  type MemoSummaryRow,
+} from "./memo-list-service";
+import {
+  registerUserRoutes,
+  type InstanceUserRow,
+} from "./user-routes";
+import { registerNotebookRoutes } from "./notebook-routes";
+import { registerMemoShareRoutes, registerPublicShareRoutes } from "./share-routes";
+import {
+  deleteStoredObjects,
+  resolveObjectStorage,
+} from "./object-storage";
+import {
+  DEFAULT_WORKSPACE_ID,
+  ensureUserWorkspace,
+} from "./workspace-provisioning";
+import {
+  MAX_ATTACHMENT_UPLOAD_BYTES,
+  MAX_IMAGE_UPLOAD_BYTES,
+  inferImageExtension,
+  mapResource,
+  mapResourceListItem,
+  mapResourceStorageSummary,
+  normalizeFilename,
+  prepareImageForStorage,
+  validateAttachmentUpload,
+  validateImageUpload,
+  type ResourceListRow,
+  type ResourceRow,
+  type ResourceStatsRow,
+} from "./resource-service";
 
-type Bindings = {
-  DB: D1Database;
-  RESOURCES: R2Bucket;
-  EDGE_EVER_AUTH_USERNAME?: string;
-  EDGE_EVER_AUTH_PASSWORD?: string;
-  EDGE_EVER_AUTH_PASSWORD_HASH?: string;
-  EDGE_EVER_SESSION_TTL_DAYS?: string;
-  EDGE_EVER_R2_BUCKET_NAME?: string;
-  EDGE_EVER_DEMO_MODE?: string;
-  EDGE_EVER_LOCAL_DEMO_SEED?: string;
-};
-
-type AuthContext = {
-  kind: "user" | "agent";
-  actorType: "user" | "agent";
-  actorId: string | null;
-  username: string;
-  displayName: string | null;
-  scopes: string[];
-  workspaceId: string;
-  role: "owner" | "member";
-  sessionId?: string;
-  tokenId?: string;
-};
-
-type AuditActor = {
-  actorType: "user" | "agent";
-  actorId: string | null;
-};
-
-type NotebookRow = {
-  id: string;
-  parent_id: string | null;
-  name: string;
-  slug: string | null;
-  icon: string | null;
-  color: string | null;
-  sort_order: number;
-  memo_count: number | null;
-  last_memo_updated_at: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type MemoSummaryRow = {
-  id: string;
-  notebook_id: string;
-  title: string | null;
-  excerpt: string;
-  content_text?: string | null;
-  tags_json: string;
-  is_pinned: number;
-  is_archived: number;
-  is_deleted: number;
-  created_at: string;
-  updated_at: string;
-  deleted_at: string | null;
-  revision: number;
-};
-
-type MemoListSortMode = "updated-desc" | "created-desc" | "title-asc";
-type MemoListFilterMode = "all" | "tagged" | "untagged" | "pinned";
-
-type MemoListCursor = {
-  sort: MemoListSortMode;
-  id: string;
-  pinned?: number;
-  updatedAt?: string;
-  createdAt?: string;
-  deletedAt?: string | null;
-  title?: string;
-};
+// Compatibility aliases keep the existing SQL-heavy implementation small
+// while routing its dependency through the platform-neutral contract above.
+// New code should use DatabaseAdapter directly.
+type D1Database = DatabaseAdapter;
+type D1PreparedStatement = PreparedStatementAdapter;
 
 type MemoDetailRow = MemoSummaryRow & {
   content_json: string;
@@ -150,8 +203,6 @@ type MemoRevisionRow = {
   created_at: string;
 };
 
-type BackupRevisionRow = MemoRevisionRow;
-
 type MemoEditSessionRow = {
   id: string;
   memo_id: string;
@@ -162,243 +213,48 @@ type MemoEditSessionRow = {
   expires_at: string;
 };
 
-type UserRow = {
-  id: string;
-  username: string;
-  password_hash: string;
-  display_name: string | null;
-  is_disabled: number;
-};
-
-type InstanceUserRow = UserRow & {
-  last_login_at: string | null;
-  created_at: string;
-  role: "owner" | "member";
-};
-
 type SessionRow = {
   id: string;
   user_id: string;
   username: string;
   display_name: string | null;
   expires_at: string;
+  last_seen_at: string | null;
+  workspace_id: string | null;
+  role: "owner" | "member" | null;
 };
 
-type ApiTokenRow = {
-  id: string;
-  name: string;
-  token_value: string | null;
-  scopes_json: string;
-  last_used_at: string | null;
-  expires_at: string | null;
-  is_revoked: number;
-  created_at: string;
+type WorkspaceIdentityRow = {
   workspace_id: string;
+  workspace_name: string;
+  is_personal: number;
+  user_id: string;
+  username: string;
+  display_name: string | null;
+  role: "owner" | "member";
 };
 
-type TagSummaryRow = {
-  name: string;
-  memo_count: number;
-  updated_at: string | null;
-};
-
-type MemoTagUpdateRow = {
-  id: string;
-  title: string | null;
-  tags_json: string;
-  content_text: string;
-};
-
-type ResourceRow = {
-  id: string;
+type MemoImportSourceRow = {
+  external_id: string;
   memo_id: string;
-  original_memo_id: string | null;
-  bucket_name: string;
-  object_key: string;
-  kind: "image" | "attachment";
-  mime_type: string | null;
-  filename: string | null;
-  byte_size: number;
-  sha256: string | null;
-  width: number | null;
-  height: number | null;
-  created_at: string;
-  updated_at: string;
+  source_updated_at: string | null;
 };
-
-type ResourceListRow = ResourceRow & {
-  memo_title: string | null;
-  memo_excerpt: string | null;
-  memo_is_deleted: number | null;
-};
-
-type ResourceStatsRow = {
-  total_count: number;
-  total_bytes: number;
-  image_count: number;
-  attachment_count: number;
-};
-
-type AppContext = Context<{ Bindings: Bindings; Variables: { auth: AuthContext } }>;
 
 const SESSION_COOKIE = "edgeever_session";
-const DEFAULT_WORKSPACE_ID = "ws_default";
-const DEFAULT_MEMO_LIST_LIMIT = 100;
-const MAX_MEMO_LIST_LIMIT = 200;
-const UNTITLED_MEMO_TITLE = "无标题笔记";
-const PASSWORD_HASH_ALGORITHM = "pbkdf2-sha256";
-const PASSWORD_HASH_ITERATIONS = 100_000;
-const PASSWORD_HASH_BYTES = 32;
-const PASSWORD_SALT_BYTES = 16;
-const SESSION_TOKEN_BYTES = 32;
 const DEFAULT_SESSION_TTL_DAYS = 400;
 const MAX_SESSION_TTL_DAYS = 400;
+const SESSION_LAST_SEEN_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const API_TOKEN_LAST_USED_UPDATE_INTERVAL_MS = 60 * 60 * 1000;
+const DEMO_RESET_LEASE_MS = 5 * 60 * 1000;
+const DEMO_RESET_COOLDOWN_MS = 60 * 1000;
 const DEFAULT_R2_BUCKET_NAME = "edgeever-resources";
-const DEMO_SEED_NOTEBOOKS = [
-  { id: "nb_inbox", parentId: null, name: "等待分类", slug: "inbox", icon: "notebook", color: "#0f766e", sortOrder: 10 },
-  { id: "nb_projects", parentId: null, name: "工作项目", slug: "work-projects", icon: "notebook", color: "#2563eb", sortOrder: 20 },
-  { id: "nb_learning", parentId: null, name: "学习资料", slug: "learning-resources", icon: "notebook", color: "#7c3aed", sortOrder: 30 },
-  { id: "nb_creative", parentId: null, name: "灵感创作", slug: "creative-ideas", icon: "notebook", color: "#db2777", sortOrder: 40 },
-  { id: "nb_personal", parentId: null, name: "生活个人", slug: "personal-life", icon: "notebook", color: "#ea580c", sortOrder: 50 },
-  { id: "nb_demo_features", parentId: "nb_projects", name: "功能演示", slug: "demo-features", icon: "notebook", color: "#0891b2", sortOrder: 21 },
-];
-const DEMO_SEED_MEMOS = [
-  {
-    id: "memo_welcome",
-    notebookId: "nb_inbox",
-    title: "欢迎来到 EdgeEver",
-    tags: ["edgeever", "welcome"],
-    isPinned: true,
-    markdown:
-      "## 欢迎来到 EdgeEver\n\n这是公开演示环境，可以放心创建、编辑、搜索和合并笔记。\n\n> 演示数据会在**每周一凌晨 1:00（北京时间）**重置并恢复这些示例笔记，请不要保存私密内容。\n\n## 3 分钟体验路线\n\n1. 新建一条临时笔记，写下一个想法并添加标签。\n2. 搜索 `workflow`、`全文搜索` 或 `分流`，体验全文搜索和标签筛选。\n3. 打开「富文本与 Markdown 编辑」，试着修改标题、引用或代码块。\n4. 在列表中多选「合并素材：访谈摘录」与「合并素材：竞品观察」，合并成一条长期笔记。\n5. 打开「图片笔记示例」，查看图片资源如何随正文一起保存。\n\n完成后可以随意删除、移动或改写这些笔记；下次重置会恢复初始状态。",
-  },
-  {
-    id: "memo_demo_editor",
-    notebookId: "nb_demo_features",
-    title: "富文本与 Markdown 编辑",
-    tags: ["editor", "markdown"],
-    isPinned: true,
-    markdown:
-      "## 富文本与 Markdown 编辑\n\n这条笔记本身就是一个可直接修改的样例：试着改动下面的标题、列表、引用和代码块，然后切换到 Markdown 视图查看对应文本。\n\n### 一份简短清单\n\n- 用标题组织内容层级\n- 用列表拆分行动项\n- 用引用保留原话或关键结论\n\n> 好笔记不是把信息堆起来，而是让下一次找到它时还能立刻行动。\n\n```ts\nconst nextStep = \"把零散想法归入一个笔记本\";\n```\n\nEdgeEver 使用 TipTap 保存结构化正文，同时保留 Markdown 和纯文本索引；API 和 MCP 都可以直接读写 Markdown。\n\n![EdgeEver 编辑器图片示例](/api/v1/resources/res_demo_editor_image/blob)",
-  },
-  {
-    id: "memo_demo_search_tags",
-    notebookId: "nb_learning",
-    title: "标签、搜索与归档",
-    tags: ["search", "tags", "workflow"],
-    isPinned: false,
-    markdown:
-      "## 标签、搜索与归档\n\n这条笔记用于体验标题、正文和标签的不同检索入口。现在就试着搜索：\n\n- `workflow`：命中标签\n- `全文搜索`：命中正文\n- `分流`：命中一个只出现在正文里的关键词\n\n建议先把临时资料放进「等待分类」，再用笔记本承载长期主题、用标签横向连接项目。这样新想法不会堵住入口，资料也不会因为只属于一个项目而被分流遗忘。",
-  },
-  {
-    id: "memo_demo_merge",
-    notebookId: "nb_demo_features",
-    title: "多选合并笔记示例",
-    tags: ["merge", "long-term-note"],
-    isPinned: false,
-    markdown:
-      "## 多选合并笔记示例\n\n现在有两条可直接操作的素材：「合并素材：访谈摘录」和「合并素材：竞品观察」。在笔记列表中多选它们，然后合并为一条长期笔记。\n\n合并后，原笔记会进入回收站，资源关联会移动到新笔记。这个能力适合把零散摘录、会议记录或调研片段整理成项目总结。",
-  },
-  {
-    id: "memo_demo_merge_interview",
-    notebookId: "nb_demo_features",
-    title: "合并素材：访谈摘录",
-    tags: ["merge", "research", "workflow"],
-    isPinned: false,
-    markdown:
-      "## 用户访谈摘录\n\n- 用户希望先快速记录，再集中整理。\n- 搜索比文件夹层级更适合回找零散灵感。\n- 重要内容需要沉淀成可持续维护的长期笔记。",
-  },
-  {
-    id: "memo_demo_merge_competitor",
-    notebookId: "nb_demo_features",
-    title: "合并素材：竞品观察",
-    tags: ["merge", "research", "workflow"],
-    isPinned: false,
-    markdown:
-      "## 竞品观察\n\n- 收集入口越轻，越容易形成待整理的资料堆。\n- 用标签连接主题，能减少重复归档。\n- 定期把片段合并成结论，能降低长期维护成本。",
-  },
-  {
-    id: "memo_demo_agent",
-    notebookId: "nb_projects",
-    title: "Agent-ready：REST API 与 MCP",
-    tags: ["api", "mcp", "agent"],
-    isPinned: false,
-    markdown:
-      "## Agent-ready：REST API 与 MCP\n\nEdgeEver 提供 REST API、OpenAPI schema 和 MCP endpoint。AI Agent 可以读取笔记本、创建笔记、整理标签，并把导入资料迁移到你的自托管实例。\n\n### 从这里开始\n\n- OpenAPI schema：`/api/openapi.json`\n- MCP endpoint：`/mcp`\n\n一个很小的 Agent 工作流是：先读取「功能演示」笔记本，再把这两条合并素材整理成一条带结论的长期笔记。",
-  },
-  {
-    id: "memo_demo_mobile",
-    notebookId: "nb_personal",
-    title: "移动端与 PWA",
-    tags: ["pwa", "mobile"],
-    isPinned: false,
-    markdown:
-      "## 移动端与 PWA\n\nEdgeEver 支持桌面三栏工作流，也适配移动端。你可以把站点安装为 PWA，用手机快速记录，再回到桌面整理。\n\n可以试试：在手机上新建一条「临时想法」，添加 `inbox` 标签；回到桌面后把它移入对应笔记本并补全内容。",
-  },
-  {
-    id: "memo_demo_images",
-    notebookId: "nb_creative",
-    title: "图片笔记示例",
-    tags: ["image", "attachment", "demo"],
-    isPinned: false,
-    markdown:
-      "## 图片笔记示例\n\n笔记正文可以直接插入图片。上传后的图片会进入 R2，正文里保存的是资源 URL，API、MCP 和前端编辑器都能读取。\n\n![EdgeEver 图片资源示例](/api/v1/resources/res_demo_gallery_image/blob)\n\n**图注：** 一张图片和它的说明、结论放在同一条笔记里，回看时就不必猜测截图来自哪里。\n\n这类笔记适合保存截图、设计稿、读书摘图和临时资料。",
-  },
-];
-const DEMO_SEED_RESOURCES = [
-  {
-    id: "res_demo_editor_image",
-    memoId: "memo_demo_editor",
-    filename: "edgeever-editor-demo.svg",
-    mimeType: "image/svg+xml",
-    width: 960,
-    height: 520,
-    svg:
-      '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="520" viewBox="0 0 960 520" role="img" aria-label="EdgeEver editor demo"><rect width="960" height="520" rx="32" fill="#f8fafc"/><rect x="42" y="44" width="876" height="432" rx="24" fill="#ffffff" stroke="#dbe7e2" stroke-width="2"/><rect x="42" y="44" width="250" height="432" rx="24" fill="#ecfdf5"/><rect x="322" y="88" width="524" height="24" rx="12" fill="#0f766e"/><rect x="322" y="138" width="408" height="14" rx="7" fill="#94a3b8"/><rect x="322" y="166" width="470" height="14" rx="7" fill="#cbd5e1"/><rect x="322" y="214" width="220" height="118" rx="18" fill="#d1fae5"/><circle cx="384" cy="272" r="34" fill="#10b981"/><path d="M356 314 402 264l35 38 24-28 51 40H356Z" fill="#047857"/><rect x="570" y="224" width="270" height="16" rx="8" fill="#64748b"/><rect x="570" y="258" width="230" height="14" rx="7" fill="#94a3b8"/><rect x="570" y="288" width="250" height="14" rx="7" fill="#cbd5e1"/><rect x="570" y="348" width="180" height="38" rx="19" fill="#10b981"/><text x="660" y="373" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#ffffff">支持图片笔记</text><rect x="78" y="90" width="170" height="18" rx="9" fill="#0f766e"/><rect x="78" y="132" width="124" height="14" rx="7" fill="#5eead4"/><rect x="78" y="166" width="148" height="14" rx="7" fill="#99f6e4"/><rect x="78" y="200" width="110" height="14" rx="7" fill="#99f6e4"/></svg>',
-  },
-  {
-    id: "res_demo_gallery_image",
-    memoId: "memo_demo_images",
-    filename: "edgeever-gallery-demo.svg",
-    mimeType: "image/svg+xml",
-    width: 960,
-    height: 540,
-    svg:
-      '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-label="EdgeEver image note demo"><defs><linearGradient id="sky" x1="0" x2="1" y1="0" y2="1"><stop offset="0" stop-color="#e0f2fe"/><stop offset="1" stop-color="#dcfce7"/></linearGradient></defs><rect width="960" height="540" rx="36" fill="url(#sky)"/><rect x="78" y="70" width="804" height="400" rx="30" fill="#ffffff" stroke="#bae6fd" stroke-width="2"/><rect x="118" y="112" width="390" height="276" rx="24" fill="#eff6ff"/><circle cx="220" cy="194" r="54" fill="#facc15"/><path d="M118 340 246 236l94 78 66-58 102 84v48H118Z" fill="#22c55e"/><path d="M118 360 292 276l112 84 104-64v92H118Z" fill="#15803d" opacity=".75"/><rect x="550" y="120" width="260" height="28" rx="14" fill="#0f172a"/><rect x="550" y="178" width="214" height="16" rx="8" fill="#64748b"/><rect x="550" y="212" width="250" height="16" rx="8" fill="#94a3b8"/><rect x="550" y="246" width="188" height="16" rx="8" fill="#cbd5e1"/><rect x="550" y="318" width="118" height="42" rx="21" fill="#0ea5e9"/><rect x="686" y="318" width="118" height="42" rx="21" fill="#10b981"/><text x="480" y="438" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#0f766e">图片会作为资源保存，并在正文中直接展示</text></svg>',
-  },
-];
-const DEMO_SEED_NOTEBOOK_IDS = DEMO_SEED_NOTEBOOKS.map((notebook) => notebook.id);
-const DEMO_SEED_MEMO_IDS = DEMO_SEED_MEMOS.map((memo) => memo.id);
-const MAX_IMAGE_UPLOAD_BYTES = 100 * 1024 * 1024;
-const MAX_ATTACHMENT_UPLOAD_BYTES = 100 * 1024 * 1024;
 const REVISION_SNAPSHOT_INTERVAL_MS = 5 * 60 * 1000;
-const API_TOKEN_BYTES = 32;
-const API_TOKEN_PREFIX = "eev";
-const ALL_TOKEN_SCOPES = [
-  "read:notebooks",
-  "write:notebooks",
-  "read:memos",
-  "write:memos",
-  "read:resources",
-  "write:resources",
-  "read:tags",
-  "write:tags",
-] as const;
-type TokenScope = (typeof ALL_TOKEN_SCOPES)[number];
-const SUPPORTED_IMAGE_MIME_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-]);
-
-const app = new Hono<{ Bindings: Bindings; Variables: { auth: AuthContext } }>();
+const app = new Hono<AppEnv>();
 
 app.use(
   "/api/*",
   cors({
-    origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+    origin: ["http://127.0.0.1:5173", "http://localhost:5173", "null"],
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     credentials: true,
@@ -408,250 +264,64 @@ app.use(
 app.use(
   "/mcp",
   cors({
-    origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+    origin: ["http://127.0.0.1:5173", "http://localhost:5173", "null"],
     allowHeaders: ["Content-Type", "Authorization"],
     allowMethods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   })
 );
 
-app.get("/api/health", (c) =>
-  c.json({
+app.get("/api/release", (c) => c.json(releaseSummary));
+
+app.get("/api/health", async (c) => {
+  const authMode = await getInstanceAuthMode(c.env, true);
+
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
+  if (!c.env.storage.resources) {
+    return c.json(
+      {
+        error: {
+          code: "object_storage_not_ready",
+          message: "Object storage is not configured. Bind RESOURCES and redeploy.",
+        },
+      },
+      503,
+    );
+  }
+
+  return c.json({
     ok: true,
     name: "edgeever",
-    runtime: "cloudflare-workers",
-  })
-);
+    runtime: c.env.EDGE_EVER_RUNTIME ?? "cloudflare-workers",
+    authMode,
+  });
+});
 
 app.get("/api/openapi.json", (c) => c.json(openApiSpec));
 
-app.get("/api/v1/auth/session", async (c) => {
-  const authRequired = await isAuthRequired(c.env);
+registerPublicShareRoutes(app);
 
-  if (!authRequired) {
-    return c.json({
-      authRequired: false,
-      authenticated: true,
-      demoMode: isDemoMode(c.env),
-      user: {
-        id: "local",
-        username: "owner",
-        displayName: "Owner",
-        role: "owner",
-      },
-    });
-  }
-
-  const auth = await authenticateRequest(c, false);
-
-  return c.json({
-    authRequired: true,
-    authenticated: Boolean(auth && auth.kind === "user"),
-    demoMode: isDemoMode(c.env),
-    user:
-      auth && auth.kind === "user"
-        ? {
-            id: auth.actorId,
-            username: auth.username,
-            displayName: auth.displayName,
-            role: auth.role,
-          }
-        : null,
-  });
+registerAuthRoutes(app, {
+  authenticateRequest: (...args) => authenticateRequest(...args),
+  authenticateSession: (...args) => authenticateSession(...args),
+  createSession: (...args) => createSession(...args),
+  ensureUserWorkspace: (...args) => ensureUserWorkspace(...args),
+  getBearerToken: (...args) => getBearerToken(...args),
+  getInstanceAuthMode: (...args) => getInstanceAuthMode(...args),
+  getLoginAttemptKeys: (...args) => getLoginAttemptKeys(...args),
+  isDemoEnvironment: (environment) => isDemoMode(environment) || isLocalDemoSeedEnabled(environment),
+  isDemoMode: (...args) => isDemoMode(...args),
+  revokeSession: (...args) => revokeSession(...args),
+  setSessionCookie: (...args) => setSessionCookie(...args),
+  tooManyLoginAttempts: (...args) => tooManyLoginAttempts(...args),
+  verifyLogin: (...args) => verifyLogin(...args),
 });
-
-app.post("/api/v1/auth/login", zValidator("json", LoginSchema), async (c) => {
-  const input = c.req.valid("json");
-  const user = await verifyLogin(c.env, input.username, input.password);
-
-  if (!user) {
-    return unauthorized(c, "Username or password is incorrect.");
-  }
-
-  const workspace = await ensureUserWorkspace(c.env.DB, user.id, user.username);
-  const session = await createSession(c, user);
-  setSessionCookie(c, session.token, session.maxAge);
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(`UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`).bind(
-      isoNow(),
-      isoNow(),
-      user.id
-    ),
-    auditStatement(c.env.DB, "user", user.id, "auth.login", "session", session.id, {
-      username: user.username,
-    }),
-  ]);
-
-  return c.json({
-    authRequired: true,
-    authenticated: true,
-    demoMode: isDemoMode(c.env),
-    sessionToken: session.token,
-    user: {
-      id: user.id,
-      username: user.username,
-      displayName: user.display_name,
-      role: workspace.role,
-    },
-  });
-});
-
-app.post("/api/v1/auth/change-password", zValidator("json", ChangePasswordSchema), async (c) => {
-  const auth = await authenticateSession(c, true);
-
-  if (!auth || auth.kind !== "user" || !auth.actorId || !auth.sessionId) {
-    return unauthorized(c, "An interactive user session is required.");
-  }
-
-  if (isDemoMode(c.env)) {
-    return forbidden(c, "The demo environment does not allow changing login passwords.");
-  }
-
-  const input = c.req.valid("json");
-  const user = await c.env.DB.prepare(
-    `SELECT id, username, password_hash, display_name, is_disabled
-     FROM users
-     WHERE id = ? AND is_disabled = 0`
-  )
-    .bind(auth.actorId)
-    .first<UserRow>();
-
-  if (!user || !(await verifyPassword(input.currentPassword, user.password_hash))) {
-    return apiError(c, "invalid_current_password", "Current password is incorrect.", 400);
-  }
-
-  const now = isoNow();
-  const passwordHash = await hashPassword(input.newPassword);
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`).bind(
-      passwordHash,
-      now,
-      user.id
-    ),
-    c.env.DB.prepare(
-      `UPDATE sessions SET revoked_at = ?
-       WHERE user_id = ? AND id != ? AND revoked_at IS NULL`
-    ).bind(now, user.id, auth.sessionId),
-    auditStatement(c.env.DB, "user", user.id, "auth.password_change", "user", user.id, {}),
-  ]);
-
-  return c.json({ ok: true });
-});
-
-app.get("/api/v1/users", async (c) => {
-  const auth = await authenticateSession(c, true);
-  if (!auth) return unauthorized(c, "Authentication required.");
-  c.set("auth", auth);
-  const denied = requireOwner(c);
-  if (denied) return denied;
-
-  const rows = await c.env.DB.prepare(
-    `SELECT u.id, u.username, u.password_hash, u.display_name, u.is_disabled,
-            u.last_login_at, u.created_at, wm.role
-     FROM users u
-     INNER JOIN workspace_members wm ON wm.user_id = u.id
-     ORDER BY wm.role = 'owner' DESC, u.created_at ASC`
-  ).all<InstanceUserRow>();
-
-  return c.json({ users: rows.results.map(mapInstanceUser) });
-});
-
-app.post("/api/v1/users", zValidator("json", UserCreateSchema), async (c) => {
-  const auth = await authenticateSession(c, true);
-  if (!auth) return unauthorized(c, "Authentication required.");
-  c.set("auth", auth);
-  const denied = requireOwner(c);
-  if (denied) return denied;
-
-  const input = c.req.valid("json");
-  const existing = await c.env.DB.prepare(`SELECT id FROM users WHERE username = ?`).bind(input.username).first();
-  if (existing) return conflict(c, "username_exists", "Username already exists.");
-
-  const userId = createId("usr");
-  const workspaceId = createId("ws");
-  const now = isoNow();
-  const passwordHash = await hashPassword(input.password);
-  const notebooks = createDefaultNotebookRows(workspaceId, now);
-  const statements = [
-    c.env.DB.prepare(
-      `INSERT INTO users (id, username, password_hash, display_name, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).bind(userId, input.username, passwordHash, input.displayName ?? input.username, now, now),
-    c.env.DB.prepare(`INSERT INTO workspaces (id, name, is_personal, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`)
-      .bind(workspaceId, `${input.displayName ?? input.username}'s workspace`, now, now),
-    c.env.DB.prepare(`INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'member', ?)`)
-      .bind(workspaceId, userId, now),
-    ...notebooks.map((notebook) => c.env.DB.prepare(
-      `INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, icon, color, sort_order, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, 'notebook', ?, ?, ?, ?)`
-    ).bind(notebook.id, workspaceId, notebook.name, notebook.slug, notebook.color, notebook.sortOrder, now, now)),
-    auditStatement(c.env.DB, "user", c.get("auth").actorId, "user.create", "user", userId, { username: input.username }),
-  ];
-  await c.env.DB.batch(statements);
-
-  const user = await getInstanceUser(c.env.DB, userId);
-  return c.json({ user: user ? mapInstanceUser(user) : null }, 201);
-});
-
-app.patch("/api/v1/users/:id", zValidator("json", UserUpdateSchema), async (c) => {
-  const auth = await authenticateSession(c, true);
-  if (!auth) return unauthorized(c, "Authentication required.");
-  c.set("auth", auth);
-  const denied = requireOwner(c);
-  if (denied) return denied;
-
-  const userId = c.req.param("id");
-  const input = c.req.valid("json");
-  const current = await getInstanceUser(c.env.DB, userId);
-  if (!current) return notFound(c, "User not found");
-  if (current.role === "owner" && input.isDisabled === true) {
-    return badRequest(c, "The instance owner cannot be disabled.");
-  }
-
-  const updates: string[] = [];
-  const binds: unknown[] = [];
-  if (input.displayName !== undefined) {
-    updates.push("display_name = ?");
-    binds.push(input.displayName);
-  }
-  if (input.password !== undefined) {
-    updates.push("password_hash = ?");
-    binds.push(await hashPassword(input.password));
-  }
-  if (input.isDisabled !== undefined) {
-    updates.push("is_disabled = ?");
-    binds.push(input.isDisabled ? 1 : 0);
-  }
-  updates.push("updated_at = ?");
-  binds.push(isoNow(), userId);
-
-  const statements = [
-    c.env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...binds),
-    auditStatement(c.env.DB, "user", c.get("auth").actorId, "user.update", "user", userId, {
-      passwordReset: input.password !== undefined,
-      isDisabled: input.isDisabled,
-    }),
-  ];
-  if (input.password !== undefined || input.isDisabled === true) {
-    statements.push(c.env.DB.prepare(`UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL`).bind(isoNow(), userId));
-  }
-  await c.env.DB.batch(statements);
-
-  const user = await getInstanceUser(c.env.DB, userId);
-  return c.json({ user: user ? mapInstanceUser(user) : null });
-});
-
-app.post("/api/v1/auth/logout", async (c) => {
-  const token = getCookie(c, SESSION_COOKIE) ?? getBearerToken(c);
-
-  if (token) {
-    await revokeSession(c.env.DB, token);
-  }
-
-  deleteCookie(c, SESSION_COOKIE, { path: "/" });
-  return c.json({ ok: true });
+registerUserRoutes(app, {
+  authenticateRequest: (...args) => authenticateRequest(...args),
+  getInstanceUser: (...args) => getInstanceUser(...args),
 });
 
 app.use("/api/v1/*", async (c, next) => {
@@ -660,9 +330,13 @@ app.use("/api/v1/*", async (c, next) => {
     return;
   }
 
-  const authRequired = await isAuthRequired(c.env);
+  const authMode = await getInstanceAuthMode(c.env);
 
-  if (!authRequired) {
+  if (authMode === "unconfigured") {
+    return authNotConfigured(c);
+  }
+
+  if (authMode === "disabled") {
     c.set("auth", {
       kind: "user",
       actorType: "user",
@@ -687,1051 +361,73 @@ app.use("/api/v1/*", async (c, next) => {
   await next();
 });
 
-app.get("/api/v1/api-tokens", async (c) => {
-  const userOnly = requireUser(c);
-
-  if (userOnly) {
-    return userOnly;
-  }
-
-  const rows = await c.env.DB.prepare(
-    `SELECT id, name, token_value, scopes_json, last_used_at, expires_at, is_revoked, created_at, workspace_id
-     FROM api_tokens
-     WHERE workspace_id = ?
-     ORDER BY is_revoked ASC, created_at DESC
-     LIMIT 200`
-  ).bind(getWorkspaceId(c)).all<ApiTokenRow>();
-
-  return c.json({
-    apiTokens: rows.results.map(mapApiToken),
-    availableScopes: ALL_TOKEN_SCOPES,
-  });
+registerObjectStorageRoutes(app, {
+  isDemoMode: (...args) => isDemoMode(...args),
+});
+registerAiRoutes(app, {
+  isDemoMode: (...args) => isDemoMode(...args),
+});
+registerAiPromptRoutes(app, {
+  isDemoMode: (...args) => isDemoMode(...args),
 });
 
-app.post("/api/v1/api-tokens", zValidator("json", ApiTokenCreateSchema), async (c) => {
-  const userOnly = requireUser(c);
-
-  if (userOnly) {
-    return userOnly;
-  }
-
-  const input = c.req.valid("json");
-  const scopes = normalizeTokenScopes(input.scopes);
-
-  if (!scopes) {
-    return badRequest(c, "Token scope is not supported.");
-  }
-
-  const id = createId("tok");
-  const token = `${API_TOKEN_PREFIX}_${randomToken(API_TOKEN_BYTES)}`;
-  const now = isoNow();
-  const actor = getAuditActor(c);
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO api_tokens (id, workspace_id, name, token_hash, token_value, scopes_json, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(id, getWorkspaceId(c), input.name, await sha256(token), token, JSON.stringify(scopes), input.expiresAt ?? null, now),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "api_token.create", "api_token", id, {
-      name: input.name,
-      scopes,
-      expiresAt: input.expiresAt ?? null,
-    }),
-  ]);
-
-  const row = await getApiTokenRow(c.env.DB, id, getWorkspaceId(c));
-
-  if (!row) {
-    return notFound(c, "API token not found");
-  }
-
-  return c.json({ token, apiToken: mapApiToken(row) } satisfies CreatedApiToken, 201);
+registerApiTokenRoutes(app, {
+  sha256: (...args) => sha256(...args),
+});
+registerNotebookRoutes(app, async (env) => {
+  if (isDemoMode(env)) await ensureDemoSeed(env);
 });
 
-app.delete("/api/v1/api-tokens/:id", async (c) => {
-  const userOnly = requireUser(c);
-
-  if (userOnly) {
-    return userOnly;
-  }
-
-  const id = c.req.param("id");
-  const actor = getAuditActor(c);
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(`DELETE FROM api_tokens WHERE id = ? AND workspace_id = ?`).bind(id, getWorkspaceId(c)),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "api_token.delete", "api_token", id, {}),
-  ]);
-
-  return c.json({ ok: true });
+registerSyncRoutes(app, {
+  clampNumber: (...args) => clampNumber(...args),
+  mapMemoDetail: (...args) => mapMemoDetail(...args),
+});
+registerTagRoutes(app);
+registerPluginDistributionRoutes(app);
+registerMemoShareRoutes(app);
+registerTemplateRoutes(app, {
+  createMemoRecord: (...args) => createMemoRecord(...args),
+  getMemoDetail: (...args) => getMemoDetail(...args),
 });
 
-app.get("/api/v1/notebooks", async (c) => {
-  const denied = requireScopes(c, "read:notebooks");
-
-  if (denied) {
-    return denied;
-  }
-
-  if (isDemoMode(c.env)) {
-    await ensureDemoSeed(c.env);
-  }
-
-  const rows = await c.env.DB.prepare(
-    notebookSelectSql(
-      `WHERE n.workspace_id = ? AND n.is_deleted = 0
-       GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at
-       ORDER BY n.parent_id IS NOT NULL, n.sort_order ASC, n.name ASC`
-    )
-  ).bind(getWorkspaceId(c)).all<NotebookRow>();
-
-  return c.json({ notebooks: rows.results.map(mapNotebook) });
+registerMemoRoutes(app, {
+  clampNumber: (...args) => clampNumber(...args),
+  createMemo: (...args) => createMemoRecord(...args),
+  createMemoEditSession: (...args) => createMemoEditSession(...args),
+  deleteMemo: (...args) => deleteMemoRecord(...args),
+  deleteMemos: (...args) => deleteMemosRecord(...args),
+  emptyTrash: (...args) => emptyTrashMemosRecord(...args),
+  getMemoDetail: (...args) => getMemoDetail(...args),
+  listMemos: (...args) => listMemos(...args),
+  listMemoRevisions: (...args) => listMemoRevisions(...args, false),
+  mergeMemos: (...args) => mergeMemosRecord(...args),
+  moveMemos: (...args) => moveMemosRecord(...args),
+  restoreMemo: (...args) => restoreMemoRecord(...args),
+  restoreMemoRevision: (...args) => restoreMemoRevisionRecord(...args),
+  updateMemo: (...args) => updateMemoRecord(...args),
 });
 
-app.post("/api/v1/notebooks", zValidator("json", NotebookCreateSchema), async (c) => {
-  const denied = requireScopes(c, "write:notebooks");
-
-  if (denied) {
-    return denied;
-  }
-
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-
-  try {
-    const notebook = await createNotebookRecord(c.env.DB, getWorkspaceId(c), input, actor);
-    return c.json({ notebook }, 201);
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
+registerBackupRoutes(app, {
+  clampNumber: (...args) => clampNumber(...args),
+  getMemoDetail: (...args) => getMemoDetail(...args),
+  mapMemoDetail: (...args) => mapMemoDetail(...args),
+  restoreJsonMemos: (...args) => restoreJsonMemos(...args),
+  restoreJsonNotebooks: (...args) => restoreJsonNotebooks(...args),
+  sha256Bytes: (...args) => sha256Bytes(...args),
 });
 
-app.patch("/api/v1/notebooks/:id", zValidator("json", NotebookUpdateSchema), async (c) => {
-  const denied = requireScopes(c, "write:notebooks");
-
-  if (denied) {
-    return denied;
-  }
-
-  const id = c.req.param("id");
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-
-  try {
-    const notebook = await updateNotebookRecord(c.env.DB, getWorkspaceId(c), id, input, actor);
-    return c.json({ notebook });
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
+registerMcpRoutes(app, {
+  authenticateRequest: (...args) => authenticateRequest(...args),
+  callTool: (...args) => callMcpTool(...args),
 });
 
-app.delete("/api/v1/notebooks/:id", async (c) => {
-  const denied = requireScopes(c, "write:notebooks");
 
-  if (denied) {
-    return denied;
-  }
-
-  const id = c.req.param("id");
-  const actor = getAuditActor(c);
-  const now = isoNow();
-  const workspaceId = getWorkspaceId(c);
-  const current = await getNotebook(c.env.DB, workspaceId, id);
-
-  if (!current) {
-    return notFound(c, "Notebook not found");
-  }
-
-  if (id === "nb_inbox" || current.slug === "inbox") {
-    return badRequest(c, "等待分类不能删除。");
-  }
-
-  const [childCount, memoCount] = await Promise.all([
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM notebooks WHERE workspace_id = ? AND parent_id = ? AND is_deleted = 0`)
-      .bind(workspaceId, id)
-      .first<{ count: number }>(),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM memos WHERE workspace_id = ? AND notebook_id = ? AND is_deleted = 0`)
-      .bind(workspaceId, id)
-      .first<{ count: number }>(),
-  ]);
-
-  if ((childCount?.count ?? 0) > 0 || (memoCount?.count ?? 0) > 0) {
-    return conflict(c, "notebook_not_empty", "Move or delete child notebooks and memos before deleting this notebook.");
-  }
-
-  await c.env.DB.prepare(
-    `UPDATE notebooks
-     SET is_deleted = 1, deleted_at = ?, updated_at = ?
-     WHERE id = ? AND workspace_id = ? AND slug <> 'inbox'`
-  )
-    .bind(now, now, id, workspaceId)
-    .run();
-
-  await audit(c.env.DB, actor.actorType, actor.actorId, "notebook.delete", "notebook", id, {});
-  return c.json({ ok: true });
-});
-
-app.get("/api/v1/tags", async (c) => {
-  const denied = requireScopes(c, "read:tags");
-
-  if (denied) {
-    return denied;
-  }
-
-  return c.json({ tags: await listTagSummaries(c.env.DB, getWorkspaceId(c)) });
-});
-
-app.patch("/api/v1/tags/:tag", zValidator("json", TagRenameSchema), async (c) => {
-  const denied = requireScopes(c, "write:tags");
-
-  if (denied) {
-    return denied;
-  }
-
-  const oldTag = decodeTagParam(c.req.param("tag"));
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-  const updated = await updateTagAcrossMemos(c.env.DB, getWorkspaceId(c), oldTag, input.name, actor, actorLabel);
-
-  return c.json({ ok: true, updated });
-});
-
-app.delete("/api/v1/tags/:tag", async (c) => {
-  const denied = requireScopes(c, "write:tags");
-
-  if (denied) {
-    return denied;
-  }
-
-  const tag = decodeTagParam(c.req.param("tag"));
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-  const updated = await updateTagAcrossMemos(c.env.DB, getWorkspaceId(c), tag, null, actor, actorLabel);
-
-  return c.json({ ok: true, updated });
-});
-
-app.get("/api/v1/memos", async (c) => {
-  const denied = requireScopes(c, "read:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const notebookId = c.req.query("notebookId");
-  const q = c.req.query("q")?.trim();
-  const includeTrash = c.req.query("trash") === "1";
-  const sort = normalizeMemoListSort(c.req.query("sort"));
-  const filter = normalizeMemoListFilter(c.req.query("filter"));
-  const limit = clampNumber(Number(c.req.query("limit") ?? DEFAULT_MEMO_LIST_LIMIT), 1, MAX_MEMO_LIST_LIMIT);
-  const cursor = decodeMemoListCursor(c.req.query("cursor"), sort);
-  const deletedClause = includeTrash ? "m.is_deleted = 1" : "m.is_deleted = 0";
-  const titleSortExpression = `LOWER(COALESCE(NULLIF(m.title, ''), '${UNTITLED_MEMO_TITLE}'))`;
-  const baseConditions = ["m.workspace_id = ?", deletedClause];
-  const baseBinds: unknown[] = [getWorkspaceId(c)];
-
-  if (notebookId) {
-    baseConditions.push("m.notebook_id = ?");
-    baseBinds.push(notebookId);
-  }
-
-  if (filter === "tagged") {
-    baseConditions.push("m.tags_json <> '[]'");
-  } else if (filter === "untagged") {
-    baseConditions.push("m.tags_json = '[]'");
-  } else if (filter === "pinned") {
-    baseConditions.push("m.is_pinned = 1");
-  }
-
-  const getOrderBy = () => {
-    if (includeTrash) {
-      return "m.deleted_at DESC, m.id DESC";
-    }
-
-    if (sort === "created-desc") {
-      return "m.is_pinned DESC, m.created_at DESC, m.id DESC";
-    }
-
-    if (sort === "title-asc") {
-      return `m.is_pinned DESC, ${titleSortExpression} ASC, m.updated_at DESC, m.id DESC`;
-    }
-
-    return "m.is_pinned DESC, m.updated_at DESC, m.id DESC";
-  };
-
-  const cursorConditions = [...baseConditions];
-  const cursorBinds = [...baseBinds];
-
-  if (cursor) {
-    if (includeTrash) {
-      cursorConditions.push("(m.deleted_at < ? OR (m.deleted_at = ? AND m.id < ?))");
-      cursorBinds.push(cursor.deletedAt ?? "", cursor.deletedAt ?? "", cursor.id);
-    } else if (sort === "created-desc") {
-      cursorConditions.push("(m.is_pinned < ? OR (m.is_pinned = ? AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))))");
-      cursorBinds.push(cursor.pinned ?? 0, cursor.pinned ?? 0, cursor.createdAt ?? "", cursor.createdAt ?? "", cursor.id);
-    } else if (sort === "title-asc") {
-      cursorConditions.push(
-        `(m.is_pinned < ? OR (m.is_pinned = ? AND (${titleSortExpression} > ? OR (${titleSortExpression} = ? AND (m.updated_at < ? OR (m.updated_at = ? AND m.id < ?))))))`
-      );
-      cursorBinds.push(cursor.pinned ?? 0, cursor.pinned ?? 0, cursor.title ?? "", cursor.title ?? "", cursor.updatedAt ?? "", cursor.updatedAt ?? "", cursor.id);
-    } else {
-      cursorConditions.push("(m.is_pinned < ? OR (m.is_pinned = ? AND (m.updated_at < ? OR (m.updated_at = ? AND m.id < ?))))");
-      cursorBinds.push(cursor.pinned ?? 0, cursor.pinned ?? 0, cursor.updatedAt ?? "", cursor.updatedAt ?? "", cursor.id);
-    }
-  }
-
-  const pageLimit = limit + 1;
-
-  if (q) {
-    const ftsQuery = toFtsQuery(q);
-    const likeQuery = `%${escapeLike(q)}%`;
-
-    if (ftsQuery) {
-      const searchPrefix = [ftsQuery, likeQuery, likeQuery, likeQuery];
-      const [rows, totalRow] = await Promise.all([
-        c.env.DB.prepare(
-          `WITH raw_matches(memo_id, rank) AS (
-             SELECT memo_id, bm25(memos_fts)
-             FROM memos_fts
-             WHERE memos_fts MATCH ?
-
-             UNION ALL
-
-             SELECT m.id, 100.0
-             FROM memos m
-             INNER JOIN memo_contents c ON c.memo_id = m.id
-             WHERE m.title LIKE ? ESCAPE '\\'
-                OR c.content_text LIKE ? ESCAPE '\\'
-                OR m.tags_json LIKE ? ESCAPE '\\'
-           ),
-           search_matches AS (
-             SELECT memo_id, MIN(rank) AS rank
-             FROM raw_matches
-             GROUP BY memo_id
-           )
-           SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-                  m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-                  mc.content_text
-           FROM search_matches s
-           INNER JOIN memos m ON m.id = s.memo_id
-           INNER JOIN memo_contents mc ON mc.memo_id = m.id
-           WHERE ${cursorConditions.join(" AND ")}
-           ORDER BY ${getOrderBy()}
-           LIMIT ?`
-        )
-          .bind(...searchPrefix, ...cursorBinds, pageLimit)
-          .all<MemoSummaryRow>(),
-        c.env.DB.prepare(
-          `WITH raw_matches(memo_id) AS (
-             SELECT memo_id
-             FROM memos_fts
-             WHERE memos_fts MATCH ?
-
-             UNION ALL
-
-             SELECT m.id
-             FROM memos m
-             INNER JOIN memo_contents c ON c.memo_id = m.id
-             WHERE m.title LIKE ? ESCAPE '\\'
-                OR c.content_text LIKE ? ESCAPE '\\'
-                OR m.tags_json LIKE ? ESCAPE '\\'
-           ),
-           search_matches AS (
-             SELECT memo_id
-             FROM raw_matches
-             GROUP BY memo_id
-           )
-           SELECT COUNT(*) AS count
-           FROM search_matches s
-           INNER JOIN memos m ON m.id = s.memo_id
-           WHERE ${baseConditions.join(" AND ")}`
-        )
-          .bind(...searchPrefix, ...baseBinds)
-          .first<{ count: number }>(),
-      ]);
-
-      const page = rows.results.slice(0, limit);
-      const nextCursor = rows.results.length > limit ? encodeMemoListCursor(page[page.length - 1], sort, includeTrash) : null;
-
-      return c.json({ memos: page.map(mapMemoSummary), totalCount: totalRow?.count ?? page.length, nextCursor });
-    }
-
-    const searchConditions = [...baseConditions, "(m.title LIKE ? ESCAPE '\\' OR mc.content_text LIKE ? ESCAPE '\\' OR m.tags_json LIKE ? ESCAPE '\\')"];
-    const searchBinds = [...baseBinds, likeQuery, likeQuery, likeQuery];
-    const searchCursorConditions = [...cursorConditions, "(m.title LIKE ? ESCAPE '\\' OR mc.content_text LIKE ? ESCAPE '\\' OR m.tags_json LIKE ? ESCAPE '\\')"];
-    const searchCursorBinds = [...cursorBinds, likeQuery, likeQuery, likeQuery];
-    const [rows, totalRow] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-                m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-                mc.content_text
-         FROM memos m
-         INNER JOIN memo_contents mc ON mc.memo_id = m.id
-         WHERE ${searchCursorConditions.join(" AND ")}
-         ORDER BY ${getOrderBy()}
-         LIMIT ?`
-      )
-        .bind(...searchCursorBinds, pageLimit)
-        .all<MemoSummaryRow>(),
-      c.env.DB.prepare(
-        `SELECT COUNT(*) AS count
-         FROM memos m
-         INNER JOIN memo_contents mc ON mc.memo_id = m.id
-         WHERE ${searchConditions.join(" AND ")}`
-      )
-        .bind(...searchBinds)
-        .first<{ count: number }>(),
-    ]);
-
-    const page = rows.results.slice(0, limit);
-    const nextCursor = rows.results.length > limit ? encodeMemoListCursor(page[page.length - 1], sort, includeTrash) : null;
-
-    return c.json({ memos: page.map(mapMemoSummary), totalCount: totalRow?.count ?? page.length, nextCursor });
-  }
-
-  const [rows, totalRow] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-              mc.content_text
-       FROM memos m
-       INNER JOIN memo_contents mc ON mc.memo_id = m.id
-       WHERE ${cursorConditions.join(" AND ")}
-       ORDER BY ${getOrderBy()}
-       LIMIT ?`
-    )
-      .bind(...cursorBinds, pageLimit)
-      .all<MemoSummaryRow>(),
-    c.env.DB.prepare(
-      `SELECT COUNT(*) AS count
-       FROM memos m
-       WHERE ${baseConditions.join(" AND ")}`
-    )
-      .bind(...baseBinds)
-      .first<{ count: number }>(),
-  ]);
-
-  const page = rows.results.slice(0, limit);
-  const nextCursor = rows.results.length > limit ? encodeMemoListCursor(page[page.length - 1], sort, includeTrash) : null;
-
-  return c.json({ memos: page.map(mapMemoSummary), totalCount: totalRow?.count ?? page.length, nextCursor });
-});
-
-app.post("/api/v1/memos", zValidator("json", MemoCreateSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-  const tags = normalizeTags(input.tags);
-  const contentMarkdown = input.contentMarkdown ?? "";
-  const contentJson = markdownToDoc(contentMarkdown);
-  const contentText = docToText(contentJson);
-  const title = normalizeMemoTitle(input.title);
-  const excerpt = createExcerpt(contentText);
-  const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
-  const id = createId("memo");
-  const now = isoNow();
-  const createdAt = input.createdAt ?? now;
-  const updatedAt = input.updatedAt ?? now;
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `INSERT INTO memos (
-        id, workspace_id, notebook_id, title, excerpt, tags_json, created_by, updated_by, created_at, updated_at
-      ) SELECT ?, ?, id, ?, ?, ?, ?, ?, ?, ? FROM notebooks WHERE id = ? AND workspace_id = ? AND is_deleted = 0`
-    ).bind(id, getWorkspaceId(c), title, excerpt, JSON.stringify(tags), actorLabel, actorLabel, createdAt, updatedAt, input.notebookId, getWorkspaceId(c)),
-    c.env.DB.prepare(
-      `INSERT INTO memo_contents (
-        memo_id, content_json, content_markdown, content_text, content_hash, revision, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
-    ).bind(id, JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, createdAt, updatedAt),
-    c.env.DB.prepare(
-      `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-       VALUES (?, ?, ?, ?)`
-    ).bind(id, title, contentText, tags.join(" ")),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.create", "memo", id, {
-      notebookId: input.notebookId,
-    }),
-  ]);
-
-  return c.json({ memo: await getMemoDetail(c.env.DB, getWorkspaceId(c), id) }, 201);
-});
-
-app.post("/api/v1/memos/batch/move", zValidator("json", MoveMemosSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const input = c.req.valid("json");
-  const target = await getNotebook(c.env.DB, getWorkspaceId(c), input.notebookId);
-
-  if (!target) {
-    return notFound(c, "Target notebook not found");
-  }
-
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-
-  try {
-    const moved = await moveMemosToNotebook(c.env.DB, getWorkspaceId(c), input.memoIds, input.notebookId, actor, actorLabel);
-
-    return c.json({ ok: true, moved });
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
-});
-
-app.post("/api/v1/memos/batch/delete", zValidator("json", DeleteMemosSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-
-  try {
-    const deleted = await deleteMemosRecord(c.env.DB, c.env.RESOURCES, getWorkspaceId(c), input.memoIds, Boolean(input.permanent), actor);
-    return c.json({ ok: true, deleted });
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
-});
-
-app.delete("/api/v1/memos/trash/empty", async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const actor = getAuditActor(c);
-  const deleted = await emptyTrashMemosRecord(c.env.DB, c.env.RESOURCES, getWorkspaceId(c), actor);
-
-  return c.json({ ok: true, deleted });
-});
-
-app.get("/api/v1/memos/:id", async (c) => {
-  const denied = requireScopes(c, "read:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const includeDeleted = c.req.query("includeDeleted") === "1";
-  const memo = await getMemoDetail(c.env.DB, getWorkspaceId(c), c.req.param("id"), includeDeleted);
-
-  if (!memo) {
-    return notFound(c, "Memo not found");
-  }
-
-  return c.json({ memo });
-});
-
-app.post("/api/v1/memos/:id/edit-sessions", async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const memoId = c.req.param("id");
-  const current = await getMemoDetailRow(c.env.DB, getWorkspaceId(c), memoId);
-
-  if (!current) {
-    return notFound(c, "Memo not found");
-  }
-
-  const actor = getAuditActor(c);
-  const now = isoNow();
-  const session: MemoEditSession = {
-    id: createId("edit"),
-    memoId,
-    baseRevision: current.revision,
-    baseContentHash: current.content_hash,
-    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString(),
-  };
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(`DELETE FROM memo_edit_sessions WHERE expires_at <= ?`).bind(now),
-    c.env.DB.prepare(
-      `INSERT INTO memo_edit_sessions (
-         id, memo_id, actor_type, actor_id, base_revision, base_content_hash,
-         expires_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      session.id,
-      memoId,
-      actor.actorType,
-      actor.actorId,
-      session.baseRevision,
-      session.baseContentHash,
-      session.expiresAt,
-      now,
-      now
-    ),
-  ]);
-
-  return c.json({ editSession: session });
-});
-
-app.get("/api/v1/memos/:id/revisions", async (c) => {
-  const denied = requireScopes(c, "read:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const memoId = c.req.param("id");
-  const memo = await getMemoDetail(c.env.DB, getWorkspaceId(c), memoId);
-
-  if (!memo) {
-    return notFound(c, "Memo not found");
-  }
-
-  const limit = clampNumber(Number(c.req.query("limit") ?? 50), 1, 100);
-  const rows = await c.env.DB.prepare(
-    `SELECT id, memo_id, revision, title, tags_json, content_json, content_markdown,
-            content_text, content_hash, created_by, created_at
-     FROM memo_revisions
-     WHERE memo_id = ?
-     ORDER BY revision DESC, created_at DESC
-     LIMIT ?`
-  )
-    .bind(memoId, limit)
-    .all<MemoRevisionRow>();
-
-  return c.json({ revisions: rows.results.map(mapMemoRevision) });
-});
-
-app.post("/api/v1/memos/:id/revisions/:revisionId/restore", async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const memoId = c.req.param("id");
-  const revisionId = c.req.param("revisionId");
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-  const current = await getMemoDetailRow(c.env.DB, getWorkspaceId(c), memoId);
-
-  if (!current) {
-    return notFound(c, "Memo not found");
-  }
-
-  const revision = await getMemoRevisionRow(c.env.DB, getWorkspaceId(c), memoId, revisionId);
-
-  if (!revision) {
-    return notFound(c, "Memo revision not found");
-  }
-
-  const tags = parseJsonArray(revision.tags_json);
-  const contentJson = parseDoc(revision.content_json);
-  const contentMarkdown = revision.content_markdown || docToMarkdown(contentJson);
-  const contentText = revision.content_text || docToText(contentJson);
-  const title = normalizeMemoTitle(revision.title);
-  const excerpt = createExcerpt(contentText);
-  const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
-  const nextRevision = current.revision + 1;
-  const now = isoNow();
-
-  await c.env.DB.batch([
-    createMemoRevisionStatement(c.env.DB, current, actorLabel, now),
-    c.env.DB.prepare(
-      `UPDATE memos
-       SET title = ?, excerpt = ?, tags_json = ?, updated_by = ?, updated_at = ?
-       WHERE id = ? AND is_deleted = 0`
-    ).bind(title, excerpt, JSON.stringify(tags), actorLabel, now, memoId),
-    c.env.DB.prepare(
-      `UPDATE memo_contents
-       SET content_json = ?, content_markdown = ?, content_text = ?, content_hash = ?,
-           revision = ?, updated_at = ?
-       WHERE memo_id = ?`
-    ).bind(JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, nextRevision, now, memoId),
-    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(memoId),
-    c.env.DB.prepare(
-      `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-       VALUES (?, ?, ?, ?)`
-    ).bind(memoId, title, contentText, tags.join(" ")),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.revision_restore", "memo", memoId, {
-      revisionId,
-      restoredRevision: revision.revision,
-      revision: nextRevision,
-    }),
-  ]);
-
-  return c.json({ memo: await getMemoDetail(c.env.DB, getWorkspaceId(c), memoId) });
-});
-
-app.get("/api/v1/exports/markdown", async (c) => {
-  const denied = requireScopes(c, "read:memos", "read:resources");
-
-  if (denied) {
-    return denied;
-  }
-
-  const limit = clampNumber(Number(c.req.query("limit") ?? 50), 1, 100);
-  const offset = clampNumber(Number(c.req.query("offset") ?? 0), 0, 1_000_000);
-  const [memoRows, totalRow] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-              mc.content_json, mc.content_markdown, mc.content_text, mc.content_hash,
-              m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
-       FROM memos m
-       INNER JOIN memo_contents mc ON mc.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0
-       ORDER BY m.created_at ASC, m.id ASC
-       LIMIT ? OFFSET ?`
-    )
-      .bind(getWorkspaceId(c), limit, offset)
-      .all<MemoDetailRow>(),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM memos WHERE workspace_id = ? AND is_deleted = 0`).bind(getWorkspaceId(c)).first<{ count: number }>(),
-  ]);
-
-  const memoIds = memoRows.results.map((row) => row.id);
-  let resources: Resource[] = [];
-
-  if (memoIds.length > 0) {
-    const placeholders = memoIds.map(() => "?").join(", ");
-    const resourceRows = await c.env.DB.prepare(
-      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.kind, r.mime_type,
-              r.filename, r.byte_size, r.sha256, r.width, r.height, r.created_at, r.updated_at
-       FROM resources
-       WHERE is_deleted = 0 AND memo_id IN (${placeholders})
-       ORDER BY memo_id ASC, created_at ASC, id ASC`
-    )
-      .bind(...memoIds)
-      .all<ResourceRow>();
-    resources = resourceRows.results.map(mapResource);
-  }
-
-  const totalCount = totalRow?.count ?? memoRows.results.length;
-  const nextOffset = offset + memoRows.results.length < totalCount ? offset + memoRows.results.length : null;
-
-  return c.json({
-    memos: memoRows.results.map(mapMemoDetail),
-    resources,
-    totalCount,
-    nextOffset,
-  });
-});
-
-app.get("/api/v1/backups/json", async (c) => {
-  const denied = requireScopes(c, "read:memos", "read:resources");
-
-  if (denied) {
-    return denied;
-  }
-
-  const limit = clampNumber(Number(c.req.query("limit") ?? 25), 1, 50);
-  const offset = clampNumber(Number(c.req.query("offset") ?? 0), 0, 1_000_000);
-  const [memoRows, totalRow] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
-              m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, mc.revision,
-              mc.content_json, mc.content_markdown, mc.content_text, mc.content_hash,
-              m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
-       FROM memos m
-       INNER JOIN memo_contents mc ON mc.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0
-       ORDER BY m.created_at ASC, m.id ASC
-       LIMIT ? OFFSET ?`
-    )
-      .bind(getWorkspaceId(c), limit, offset)
-      .all<MemoDetailRow>(),
-    c.env.DB.prepare(`SELECT COUNT(*) AS count FROM memos WHERE workspace_id = ? AND is_deleted = 0`).bind(getWorkspaceId(c)).first<{ count: number }>(),
-  ]);
-  const memoIds = memoRows.results.map((row) => row.id);
-  let resources: Resource[] = [];
-  let revisions: JsonBackupRevision[] = [];
-
-  if (memoIds.length > 0) {
-    const placeholders = memoIds.map(() => "?").join(", ");
-    const [resourceRows, revisionRows] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT id, memo_id, original_memo_id, bucket_name, object_key, kind, mime_type,
-                filename, byte_size, sha256, width, height, created_at, updated_at
-         FROM resources
-         WHERE is_deleted = 0 AND memo_id IN (${placeholders})
-         ORDER BY memo_id ASC, created_at ASC, id ASC`
-      )
-        .bind(...memoIds)
-        .all<ResourceRow>(),
-      c.env.DB.prepare(
-        `SELECT id, memo_id, revision, title, tags_json, content_json, content_markdown,
-                content_text, content_hash, created_by, created_at
-         FROM memo_revisions
-         WHERE memo_id IN (${placeholders})
-         ORDER BY memo_id ASC, revision ASC, created_at ASC`
-      )
-        .bind(...memoIds)
-        .all<BackupRevisionRow>(),
-    ]);
-    resources = resourceRows.results.map(mapResource);
-    revisions = revisionRows.results.map(mapJsonBackupRevision);
-  }
-
-  const totalCount = totalRow?.count ?? memoRows.results.length;
-  const nextOffset = offset + memoRows.results.length < totalCount ? offset + memoRows.results.length : null;
-
-  return c.json({
-    memos: memoRows.results.map(mapMemoDetail),
-    resources,
-    revisions,
-    totalCount,
-    nextOffset,
-  });
-});
-
-app.post("/api/v1/restores/json/notebooks", zValidator("json", RestoreJsonNotebooksSchema), async (c) => {
-  const userOnly = requireUser(c);
-  if (userOnly) {
-    return userOnly;
-  }
-
-  await restoreJsonNotebooks(c.env.DB, getWorkspaceId(c), c.req.valid("json").notebooks as JsonBackupNotebook[]);
-  return c.json({ ok: true });
-});
-
-app.post("/api/v1/restores/json/memos", zValidator("json", RestoreJsonMemosSchema), async (c) => {
-  const userOnly = requireUser(c);
-  if (userOnly) {
-    return userOnly;
-  }
-
-  await restoreJsonMemos(c.env.DB, getWorkspaceId(c), c.req.valid("json").memos as JsonBackupMemo[]);
-  return c.json({ ok: true });
-});
-
-app.put("/api/v1/restores/json/resources/:id", async (c) => {
-  const userOnly = requireUser(c);
-  if (userOnly) {
-    return userOnly;
-  }
-
-  const form = await c.req.raw.formData();
-  const file = form.get("file");
-  const metadataValue = form.get("metadata");
-  if (!(file instanceof File) || typeof metadataValue !== "string") {
-    return badRequest(c, "Restore resource file and metadata are required.");
-  }
-
-  let metadataInput: unknown;
-  try {
-    metadataInput = JSON.parse(metadataValue);
-  } catch {
-    return badRequest(c, "Restore resource metadata must be valid JSON.");
-  }
-
-  const parsed = JsonBackupResourceMetadataSchema.safeParse(metadataInput);
-  if (!parsed.success || parsed.data.id !== c.req.param("id")) {
-    return badRequest(c, "Restore resource metadata is invalid.");
-  }
-
-  const metadata = parsed.data as JsonBackupResource;
-  const memo = await getMemoDetail(c.env.DB, getWorkspaceId(c), metadata.memoId);
-  if (!memo) {
-    return notFound(c, "Restore target memo not found.");
-  }
-
-  const maxBytes = metadata.kind === "image" ? MAX_IMAGE_UPLOAD_BYTES : MAX_ATTACHMENT_UPLOAD_BYTES;
-  if (file.size <= 0 || file.size > maxBytes) {
-    return apiError(c, "upload_too_large", "Backup resource size is invalid.", 413);
-  }
-
-  const filename = normalizeFilename(metadata.filename || file.name) || `${metadata.kind}-${metadata.id}`;
-  const objectKey = `workspaces/${getWorkspaceId(c)}/restores/${metadata.memoId}/${metadata.id}/${Date.now()}-${filename}`;
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const foreignResource = await c.env.DB.prepare(
-    `SELECT r.id FROM resources r INNER JOIN memos m ON m.id = r.memo_id
-     WHERE r.id = ? AND m.workspace_id <> ? LIMIT 1`
-  ).bind(metadata.id, getWorkspaceId(c)).first<{ id: string }>();
-  if (foreignResource) {
-    return conflict(c, "cross_workspace_id_conflict", "Backup resource ID is already used by another user.");
-  }
-  const previous = await c.env.DB.prepare(
-    `SELECT r.object_key FROM resources r INNER JOIN memos m ON m.id = r.memo_id WHERE r.id = ? AND m.workspace_id = ?`
-  ).bind(metadata.id, getWorkspaceId(c)).first<{ object_key: string }>();
-  const originalMemo = metadata.originalMemoId
-    ? await c.env.DB.prepare(`SELECT id FROM memos WHERE id = ? AND workspace_id = ?`).bind(metadata.originalMemoId, getWorkspaceId(c)).first<{ id: string }>()
-    : null;
-
-  await c.env.RESOURCES.put(objectKey, bytes, {
-    httpMetadata: { contentType: metadata.mimeType ?? file.type ?? "application/octet-stream" },
-    customMetadata: { memoId: metadata.memoId, resourceId: metadata.id, restored: "true" },
-  });
-
-  try {
-    const now = isoNow();
-    await c.env.DB.prepare(
-      `INSERT INTO resources (
-        id, memo_id, original_memo_id, bucket_name, object_key, kind, mime_type, filename,
-        byte_size, sha256, width, height, metadata_json, is_deleted, created_at, updated_at, deleted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
-      ON CONFLICT(id) DO UPDATE SET
-        memo_id = excluded.memo_id,
-        original_memo_id = excluded.original_memo_id,
-        bucket_name = excluded.bucket_name,
-        object_key = excluded.object_key,
-        kind = excluded.kind,
-        mime_type = excluded.mime_type,
-        filename = excluded.filename,
-        byte_size = excluded.byte_size,
-        sha256 = excluded.sha256,
-        width = excluded.width,
-        height = excluded.height,
-        metadata_json = excluded.metadata_json,
-        is_deleted = 0,
-        updated_at = excluded.updated_at,
-        deleted_at = NULL`
-    ).bind(
-      metadata.id,
-      metadata.memoId,
-      originalMemo?.id ?? null,
-      c.env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME,
-      objectKey,
-      metadata.kind,
-      metadata.mimeType ?? file.type ?? null,
-      filename,
-      bytes.byteLength,
-      await sha256Bytes(bytes),
-      metadata.width,
-      metadata.height,
-      JSON.stringify({ source: "edgeever-zip-import" }),
-      metadata.createdAt,
-      now
-    ).run();
-  } catch (error) {
-    await c.env.RESOURCES.delete(objectKey);
-    throw error;
-  }
-
-  if (previous?.object_key && previous.object_key !== objectKey) {
-    await c.env.RESOURCES.delete(previous.object_key);
-  }
-
-  return c.json({ ok: true });
-});
-
-app.get("/api/v1/resources", async (c) => {
-  const denied = requireScopes(c, "read:resources");
-
-  if (denied) {
-    return denied;
-  }
-
-  const limit = clampNumber(Number(c.req.query("limit") ?? 500), 1, 500);
-  const [rows, stats] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.kind,
-              r.mime_type, r.filename, r.byte_size, r.sha256, r.width, r.height,
-              r.created_at, r.updated_at, m.title AS memo_title, m.excerpt AS memo_excerpt,
-              m.is_deleted AS memo_is_deleted
-       FROM resources r
-       INNER JOIN memos m ON m.id = r.memo_id
-       WHERE m.workspace_id = ? AND r.is_deleted = 0
-       ORDER BY r.created_at DESC
-       LIMIT ?`
-    )
-      .bind(getWorkspaceId(c), limit)
-      .all<ResourceListRow>(),
-    c.env.DB.prepare(
-      `SELECT COUNT(*) AS total_count,
-              COALESCE(SUM(byte_size), 0) AS total_bytes,
-              COALESCE(SUM(CASE WHEN kind = 'image' THEN 1 ELSE 0 END), 0) AS image_count,
-              COALESCE(SUM(CASE WHEN kind = 'attachment' THEN 1 ELSE 0 END), 0) AS attachment_count
-       FROM resources r
-       INNER JOIN memos m ON m.id = r.memo_id
-       WHERE m.workspace_id = ? AND r.is_deleted = 0`
-    ).bind(getWorkspaceId(c)).first<ResourceStatsRow>(),
-  ]);
-
-  return c.json({
-    resources: rows.results.map(mapResourceListItem),
-    summary: mapResourceStorageSummary(stats),
-  });
-});
-
-app.post("/api/v1/memos/:id/resources", async (c) => {
-  const denied = requireScopes(c, "write:resources");
-
-  if (denied) {
-    return denied;
-  }
-
-  const memoId = c.req.param("id");
-  const memo = await getMemoDetail(c.env.DB, getWorkspaceId(c), memoId);
-
-  if (!memo) {
-    return notFound(c, "Memo not found");
-  }
-
-  const form = await c.req.raw.formData();
-  const file = form.get("file");
-
-  if (!(file instanceof File)) {
-    return badRequest(c, "Expected multipart form field named file.");
-  }
-
-  const actor = getAuditActor(c);
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const mimeType = file.type || "application/octet-stream";
-  let resource: Resource;
-
-  try {
-    resource = SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)
-      ? await createImageResource(c, {
-          memoId,
-          filename: file.name,
-          mimeType,
-          bytes,
-          actor,
-          source: "upload",
-        })
-      : await createAttachmentResource(c, {
-          memoId,
-          filename: file.name,
-          mimeType,
-          bytes,
-          actor,
-        });
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
-
-  return c.json({ resource }, 201);
+registerResourceRoutes(app, {
+  clampNumber: (...args) => clampNumber(...args),
+  createAttachmentResource: (...args) => createAttachmentResource(...args),
+  createImageResource: (...args) => createImageResource(...args),
+  getMemoDetail: (...args) => getMemoDetail(...args),
+  getResourceRow: (...args) => getResourceRow(...args),
 });
 
 const createImageResource = async (
@@ -1756,11 +452,11 @@ const createImageResource = async (
     source: input.source,
   });
   const objectKey = `workspaces/${getWorkspaceId(c)}/memos/${input.memoId}/${resourceId}${inferImageExtension(processed.filename, processed.mimeType)}`;
-  const bucketName = c.env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME;
+  const destination = await resolveObjectStorage(c.env);
   const filename = normalizeFilename(processed.filename) || `${resourceId}${inferImageExtension(processed.filename, processed.mimeType)}`;
   const checksum = await sha256Bytes(processed.bytes);
 
-  await c.env.RESOURCES.put(objectKey, processed.bytes, {
+  await destination.store.put(objectKey, processed.bytes, {
     httpMetadata: {
       contentType: processed.mimeType,
       cacheControl: "private, max-age=3600",
@@ -1773,17 +469,18 @@ const createImageResource = async (
   });
 
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare(
+    await c.env.storage.db.batch([
+      c.env.storage.db.prepare(
         `INSERT INTO resources (
-          id, memo_id, bucket_name, object_key, kind, mime_type, filename,
+          id, memo_id, bucket_name, object_key, storage_config_id, kind, mime_type, filename,
           byte_size, sha256, width, height, metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).bind(
         resourceId,
         input.memoId,
-        bucketName,
+        destination.bucketName,
         objectKey,
+        destination.configId,
         processed.mimeType,
         filename,
         processed.bytes.byteLength,
@@ -1794,7 +491,7 @@ const createImageResource = async (
         now,
         now
       ),
-      auditStatement(c.env.DB, input.actor.actorType, input.actor.actorId, "resource.create", "resource", resourceId, {
+      auditStatement(c.env.storage.db, input.actor.actorType, input.actor.actorId, "resource.create", "resource", resourceId, {
         memoId: input.memoId,
         mimeType: processed.mimeType,
         byteSize: processed.bytes.byteLength,
@@ -1802,11 +499,11 @@ const createImageResource = async (
       }),
     ]);
   } catch (error) {
-    await c.env.RESOURCES.delete(objectKey);
+    await destination.store.delete(objectKey);
     throw error;
   }
 
-  const resource = await getResourceRow(c.env.DB, getWorkspaceId(c), resourceId);
+  const resource = await getResourceRow(c.env.storage.db, getWorkspaceId(c), resourceId);
 
   if (!resource) {
     throw new AppError("not_found", "Resource not found", 404);
@@ -1831,10 +528,10 @@ const createAttachmentResource = async (
   const now = isoNow();
   const filename = normalizeFilename(input.filename) || resourceId;
   const objectKey = `workspaces/${getWorkspaceId(c)}/memos/${input.memoId}/${resourceId}`;
-  const bucketName = c.env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME;
+  const destination = await resolveObjectStorage(c.env);
   const checksum = await sha256Bytes(input.bytes);
 
-  await c.env.RESOURCES.put(objectKey, input.bytes, {
+  await destination.store.put(objectKey, input.bytes, {
     httpMetadata: {
       contentType: input.mimeType,
       cacheControl: "private, max-age=3600",
@@ -1847,17 +544,18 @@ const createAttachmentResource = async (
   });
 
   try {
-    await c.env.DB.batch([
-      c.env.DB.prepare(
+    await c.env.storage.db.batch([
+      c.env.storage.db.prepare(
         `INSERT INTO resources (
-          id, memo_id, bucket_name, object_key, kind, mime_type, filename,
+          id, memo_id, bucket_name, object_key, storage_config_id, kind, mime_type, filename,
           byte_size, sha256, width, height, metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'attachment', ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, 'attachment', ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`
       ).bind(
         resourceId,
         input.memoId,
-        bucketName,
+        destination.bucketName,
         objectKey,
+        destination.configId,
         input.mimeType,
         filename,
         input.bytes.byteLength,
@@ -1866,18 +564,18 @@ const createAttachmentResource = async (
         now,
         now
       ),
-      auditStatement(c.env.DB, input.actor.actorType, input.actor.actorId, "resource.create", "resource", resourceId, {
+      auditStatement(c.env.storage.db, input.actor.actorType, input.actor.actorId, "resource.create", "resource", resourceId, {
         memoId: input.memoId,
         mimeType: input.mimeType,
         byteSize: input.bytes.byteLength,
       }),
     ]);
   } catch (error) {
-    await c.env.RESOURCES.delete(objectKey);
+    await destination.store.delete(objectKey);
     throw error;
   }
 
-  const resource = await getResourceRow(c.env.DB, getWorkspaceId(c), resourceId);
+  const resource = await getResourceRow(c.env.storage.db, getWorkspaceId(c), resourceId);
 
   if (!resource) {
     throw new AppError("not_found", "Resource not found", 404);
@@ -1886,485 +584,61 @@ const createAttachmentResource = async (
   return mapResource(resource);
 };
 
-const validateImageUpload = (mimeType: string, size: number) => {
-  if (!SUPPORTED_IMAGE_MIME_TYPES.has(mimeType)) {
-    throw new AppError("unsupported_media_type", "Only PNG, JPEG, GIF, WebP and AVIF images are supported.", 415);
-  }
-
-  if (size <= 0 || size > MAX_IMAGE_UPLOAD_BYTES) {
-    throw new AppError("upload_too_large", "Image must be between 1 byte and 50 MB.", 413);
-  }
-};
-
-const validateAttachmentUpload = (size: number) => {
-  if (size <= 0 || size > MAX_ATTACHMENT_UPLOAD_BYTES) {
-    throw new AppError("upload_too_large", "Attachment must be between 1 byte and 50 MB.", 413);
-  }
-};
-
-type PreparedImage = {
-  bytes: Uint8Array;
-  mimeType: string;
-  filename: string;
-  width: number | null;
-  height: number | null;
-  compressed: boolean;
-  metadata: Record<string, unknown>;
-};
-
-const prepareImageForStorage = (input: {
-  bytes: Uint8Array;
-  filename: string;
-  mimeType: string;
-  source: "upload" | "mcp";
-}): PreparedImage => ({
-  bytes: input.bytes,
-  mimeType: input.mimeType,
-  filename: input.filename,
-  width: null,
-  height: null,
-  compressed: false,
-  metadata: {
-    source: input.source,
-    originalFilename: normalizeFilename(input.filename) || null,
-    originalMimeType: input.mimeType,
-    originalByteSize: input.bytes.byteLength,
-    compression: "disabled",
-  },
-});
-
-app.get("/api/v1/resources/:id/blob", async (c) => {
-  const denied = requireScopes(c, "read:resources");
-
-  if (denied) {
-    return denied;
-  }
-
-  const resource = await getResourceRow(c.env.DB, getWorkspaceId(c), c.req.param("id"));
-
-  if (!resource) {
-    return notFound(c, "Resource not found");
-  }
-
-  const object = await c.env.RESOURCES.get(resource.object_key);
-
-  if (!object) {
-    return notFound(c, "Resource object not found");
-  }
-
-  const headers = new Headers();
-  object.writeHttpMetadata(headers);
-  headers.set("Content-Type", resource.mime_type ?? headers.get("Content-Type") ?? "application/octet-stream");
-  headers.set("Cache-Control", headers.get("Cache-Control") ?? "private, max-age=3600");
-  headers.set("Content-Length", String(object.size));
-  headers.set("Content-Disposition", contentDispositionInline(resource.filename));
-  headers.set("X-Content-Type-Options", "nosniff");
-
-  return new Response(object.body, { headers });
-});
-
-app.patch("/api/v1/memos/:id", zValidator("json", MemoUpdateSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  return updateMemoFromInput(c, c.req.param("id"), c.req.valid("json"));
-});
-
-app.post("/api/v1/memos/:id/save", zValidator("json", MemoUpdateSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  return updateMemoFromInput(c, c.req.param("id"), c.req.valid("json"));
-});
-
-const updateMemoFromInput = async (c: AppContext, id: string, input: MemoUpdateInput) => {
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-  const workspaceId = getWorkspaceId(c);
-  const current = await getMemoDetailRow(c.env.DB, workspaceId, id);
-
-  if (!current) {
-    return notFound(c, "Memo not found");
-  }
-
-  if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
+app.post("/api/v1/demo/reset", async (c) => {
+  if (!isDemoMode(c.env) && !isLocalDemoSeedEnabled(c.env)) {
     return c.json(
       {
         error: {
-          code: "revision_conflict",
-          message: "Memo was updated elsewhere. Reload before saving.",
-          details: {
-            expectedRevision: input.expectedRevision,
-            currentRevision: current.revision,
-          },
+          code: "demo_mode_disabled",
+          message: "Demo reset is only available when demo mode or local demo seed is enabled",
         },
       },
-      409
+      400
     );
   }
 
-  const hasDocumentUpdate = input.contentJson !== undefined || input.contentMarkdown !== undefined;
-  let editSession: MemoEditSessionRow | null = null;
+  await resetDemoData(c.env, Date.now());
+  return c.json({
+    success: true,
+    message: "Demo seed data successfully restored",
+  });
+});
 
-  if (hasDocumentUpdate) {
-    if (!input.editSessionId || !input.expectedContentHash || input.expectedRevision === undefined) {
-      return c.json(
-        { error: { code: "edit_session_required", message: "A bound edit session is required to save note content." } },
-        428
-      );
+/**
+ * Executes the platform-neutral EdgeEver application with an injected storage
+ * adapter. Runtime entrypoints must remain thin and call this function rather
+ * than introducing platform-specific route or service implementations.
+ */
+export const fetchEdgeEverApp = async (
+  request: Request,
+  runtimeEnv: Bindings,
+  ctx: ExecutionContext,
+) => {
+    if (isLocalDemoSeedEnabled(runtimeEnv)) {
+      await ensureLocalDemoSeed(runtimeEnv);
     }
 
-    if (input.expectedContentHash !== current.content_hash) {
-      return c.json(
-        { error: { code: "content_conflict", message: "Note content changed after this edit session started." } },
-        409
-      );
-    }
-
-    editSession = await c.env.DB.prepare(
-      `SELECT id, memo_id, actor_type, actor_id, base_revision, base_content_hash, expires_at
-       FROM memo_edit_sessions
-       WHERE id = ? AND memo_id = ? AND actor_type = ? AND actor_id IS ? AND expires_at > ?`
-    )
-      .bind(input.editSessionId, id, actor.actorType, actor.actorId, isoNow())
-      .first<MemoEditSessionRow>();
-
-    if (
-      !editSession ||
-      !isMemoEditBindingValid(
-        { memoId: id, revision: current.revision, contentHash: current.content_hash },
-        {
-          id: editSession.id,
-          memoId: editSession.memo_id,
-          baseRevision: editSession.base_revision,
-          baseContentHash: editSession.base_content_hash,
-        },
-        {
-          editSessionId: input.editSessionId,
-          memoId: id,
-          expectedRevision: input.expectedRevision,
-          expectedContentHash: input.expectedContentHash,
-        }
-      )
-    ) {
-      return c.json(
-        { error: { code: "edit_session_conflict", message: "The edit session is stale or belongs to another note." } },
-        409
-      );
-    }
-  }
-
-  const isPinned = input.isPinned ?? Boolean(current.is_pinned);
-  const hasContentUpdate =
-    input.notebookId !== undefined ||
-    input.title !== undefined ||
-    input.contentJson !== undefined ||
-    input.contentMarkdown !== undefined ||
-    input.tags !== undefined ||
-    input.createdAt !== undefined ||
-    input.updatedAt !== undefined;
-  const now = isoNow();
-  const updatedAt = input.updatedAt ?? now;
-
-  if (!hasContentUpdate) {
-    if (input.isPinned === undefined || isPinned === Boolean(current.is_pinned)) {
-      return c.json({ memo: await getMemoDetail(c.env.DB, workspaceId, id) });
-    }
-
-    await c.env.DB.batch([
-      c.env.DB.prepare(
-        `UPDATE memos
-         SET is_pinned = ?, updated_by = ?, updated_at = ?, created_at = COALESCE(?, created_at)
-         WHERE id = ? AND is_deleted = 0`
-      ).bind(isPinned ? 1 : 0, actorLabel, updatedAt, input.createdAt ?? null, id),
-      auditStatement(c.env.DB, actor.actorType, actor.actorId, isPinned ? "memo.pin" : "memo.unpin", "memo", id, {}),
-    ]);
-
-    return c.json({ memo: await getMemoDetail(c.env.DB, workspaceId, id) });
-  }
-
-  const currentContentJson = JSON.parse(current.content_json) as TiptapDoc;
-  const contentJson = input.contentJson
-    ? (input.contentJson as TiptapDoc)
-    : input.contentMarkdown !== undefined
-      ? markdownToDoc(input.contentMarkdown)
-      : currentContentJson;
-  const contentMarkdown =
-    input.contentMarkdown !== undefined ? input.contentMarkdown : docToMarkdown(contentJson);
-  const contentText = docToText(contentJson);
-  const title =
-    input.title !== undefined ? normalizeMemoTitle(input.title) : normalizeMemoTitle(current.title);
-  if (
-    !input.allowDestructiveOverwrite &&
-    isSuspiciousMemoOverwrite(current.title, current.content_text, title, contentText)
-  ) {
-    return c.json(
-      {
-        error: {
-          code: "suspicious_memo_overwrite",
-          message: "Save blocked because the title changed while most of the note content disappeared.",
-        },
-      },
-      409
-    );
-  }
-  const tags = input.tags === undefined ? parseJsonArray(current.tags_json) : normalizeTags(input.tags);
-  const excerpt = createExcerpt(contentText);
-  const notebookId = input.notebookId ?? current.notebook_id;
-  const nextRevision = current.revision + 1;
-  const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
-  const revisionStatements = (await shouldSnapshotMemoRevision(c.env.DB, current, title, JSON.stringify(tags), contentHash, updatedAt))
-    ? [createMemoRevisionStatement(c.env.DB, current, actorLabel, updatedAt)]
-    : [];
-  const editSessionStatements = editSession
-    ? [
-        c.env.DB.prepare(
-          `UPDATE memo_edit_sessions
-           SET base_revision = ?, base_content_hash = ?, updated_at = ?
-           WHERE id = ? AND memo_id = ? AND base_revision = ? AND base_content_hash = ?`
-        ).bind(nextRevision, contentHash, updatedAt, editSession.id, id, current.revision, current.content_hash),
-      ]
-    : [
-        c.env.DB.prepare(
-          `UPDATE memo_edit_sessions
-           SET base_revision = ?, base_content_hash = ?, updated_at = ?
-           WHERE memo_id = ? AND actor_type = ? AND actor_id IS ?
-             AND base_revision = ? AND base_content_hash = ? AND expires_at > ?`
-        ).bind(
-          nextRevision,
-          contentHash,
-          updatedAt,
-          id,
-          actor.actorType,
-          actor.actorId,
-          current.revision,
-          current.content_hash,
-          updatedAt
-        ),
-      ];
-
-  await c.env.DB.batch([
-    ...revisionStatements,
-    c.env.DB.prepare(
-      `UPDATE memos
-       SET notebook_id = ?, title = ?, excerpt = ?, tags_json = ?, is_pinned = ?, updated_by = ?, updated_at = ?, created_at = COALESCE(?, created_at)
-       WHERE id = ? AND workspace_id = ? AND is_deleted = 0
-         AND EXISTS (SELECT 1 FROM notebooks n WHERE n.id = ? AND n.workspace_id = ? AND n.is_deleted = 0)`
-    ).bind(notebookId, title, excerpt, JSON.stringify(tags), isPinned ? 1 : 0, actorLabel, updatedAt, input.createdAt ?? null, id, workspaceId, notebookId, workspaceId),
-    c.env.DB.prepare(
-      `UPDATE memo_contents
-       SET content_json = ?, content_markdown = ?, content_text = ?, content_hash = ?,
-           revision = ?, updated_at = ?, created_at = COALESCE(?, created_at)
-       WHERE memo_id = ?`
-    ).bind(JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, nextRevision, updatedAt, input.createdAt ?? null, id),
-    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
-    c.env.DB.prepare(
-      `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-       VALUES (?, ?, ?, ?)`
-    ).bind(id, title, contentText, tags.join(" ")),
-    ...editSessionStatements,
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.update", "memo", id, {
-      revision: nextRevision,
-    }),
-  ]);
-
-  return c.json({ memo: await getMemoDetail(c.env.DB, workspaceId, id) });
+    return app.fetch(request, runtimeEnv, ctx);
 };
-
-app.delete("/api/v1/memos/:id", async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const id = c.req.param("id");
-  const actor = getAuditActor(c);
-  const permanent = c.req.query("permanent") === "1";
-  const now = isoNow();
-  const workspaceId = getWorkspaceId(c);
-
-  if (permanent) {
-    const current = await getMemoDetailRow(c.env.DB, workspaceId, id, true);
-
-    if (!current || current.is_deleted === 0) {
-      return notFound(c, "Memo not found in trash");
-    }
-
-    const resources = await getResourceRowsForMemo(c.env.DB, workspaceId, id);
-
-    if (resources.length > 0) {
-      await c.env.RESOURCES.delete(resources.map((resource) => resource.object_key));
-    }
-
-    await c.env.DB.batch([
-      c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
-      c.env.DB.prepare(`DELETE FROM resources WHERE memo_id = ?`).bind(id),
-      c.env.DB.prepare(`DELETE FROM memo_revisions WHERE memo_id = ?`).bind(id),
-      c.env.DB.prepare(`DELETE FROM memo_contents WHERE memo_id = ?`).bind(id),
-      c.env.DB.prepare(`DELETE FROM memos WHERE id = ? AND workspace_id = ? AND is_deleted = 1`).bind(id, workspaceId),
-      auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.delete_permanent", "memo", id, {}),
-    ]);
-
-    return c.json({ ok: true });
-  }
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE memos
-       SET is_deleted = 1, deleted_at = ?, updated_at = ?
-       WHERE id = ? AND workspace_id = ? AND is_deleted = 0`
-    ).bind(now, now, id, workspaceId),
-    c.env.DB.prepare(
-      `UPDATE resources
-       SET is_deleted = 1, deleted_at = ?, updated_at = ?
-       WHERE memo_id = ? AND is_deleted = 0`
-    ).bind(now, now, id),
-    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.delete", "memo", id, {}),
-  ]);
-
-  return c.json({ ok: true });
-});
-
-app.post("/api/v1/memos/:id/restore", async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const id = c.req.param("id");
-  const actor = getAuditActor(c);
-  const workspaceId = getWorkspaceId(c);
-  const current = await getMemoDetailRow(c.env.DB, workspaceId, id, true);
-
-  if (!current || current.is_deleted === 0) {
-    return notFound(c, "Memo not found in trash");
-  }
-
-  const tags = parseJsonArray(current.tags_json);
-  const now = isoNow();
-  const originalNotebook = await getNotebook(c.env.DB, workspaceId, current.notebook_id);
-  const inbox = await c.env.DB.prepare(`SELECT id FROM notebooks WHERE workspace_id = ? AND slug = 'inbox' AND is_deleted = 0 LIMIT 1`).bind(workspaceId).first<{ id: string }>();
-  const restoreNotebookId = originalNotebook ? current.notebook_id : inbox?.id;
-
-  if (!restoreNotebookId) {
-    return conflict(c, "restore_notebook_missing", "Original notebook was deleted and the default inbox is unavailable.");
-  }
-
-  await c.env.DB.batch([
-    c.env.DB.prepare(
-      `UPDATE memos
-       SET notebook_id = ?, is_deleted = 0, deleted_at = NULL, updated_at = ?
-       WHERE id = ? AND workspace_id = ? AND is_deleted = 1`
-    ).bind(restoreNotebookId, now, id, workspaceId),
-    c.env.DB.prepare(
-      `UPDATE resources
-       SET is_deleted = 0, deleted_at = NULL, updated_at = ?
-       WHERE memo_id = ? AND is_deleted = 1`
-    ).bind(now, id),
-    c.env.DB.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
-    c.env.DB.prepare(
-      `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-       VALUES (?, ?, ?, ?)`
-    ).bind(id, current.title, current.content_text, tags.join(" ")),
-    auditStatement(c.env.DB, actor.actorType, actor.actorId, "memo.restore", "memo", id, {
-      fromNotebookId: current.notebook_id,
-      toNotebookId: restoreNotebookId,
-    }),
-  ]);
-
-  return c.json({ memo: await getMemoDetail(c.env.DB, workspaceId, id) });
-});
-
-app.post("/api/v1/memos/merge", zValidator("json", MergeMemosSchema), async (c) => {
-  const denied = requireScopes(c, "write:memos");
-
-  if (denied) {
-    return denied;
-  }
-
-  const input = c.req.valid("json");
-  const actor = getAuditActor(c);
-  const actorLabel = getActorLabel(c);
-
-  try {
-    const memo = await mergeMemosRecord(c.env.DB, getWorkspaceId(c), input, actor, actorLabel);
-    return c.json({ memo }, 201);
-  } catch (error) {
-    if (error instanceof AppError) {
-      return apiError(c, error.code, error.message, error.status);
-    }
-
-    throw error;
-  }
-});
-
-app.get("/mcp", (c) =>
-  c.json({
-    name: "EdgeEver MCP endpoint",
-    status: "ready",
-    transport: "streamable-http-jsonrpc",
-    auth: "Authorization: Bearer <api-token>",
-    restBasePath: "/api/v1",
-  })
-);
-
-app.post("/mcp", async (c) => {
-  let payload: unknown;
-
-  try {
-    payload = await c.req.json();
-  } catch {
-    return c.json(jsonRpcError(null, -32700, "Parse error"), 400);
-  }
-
-  if (Array.isArray(payload)) {
-    if (payload.length === 0) {
-      return c.json(jsonRpcError(null, -32600, "Invalid Request"), 400);
-    }
-
-    const results = await Promise.all(payload.map((request) => handleMcpMessage(c, request)));
-    const responses = results.filter((result): result is JsonRpcHandlerResult => Boolean(result));
-    const bodies = responses.map((response) => response.body);
-
-    if (bodies.length === 0) {
-      return new Response(null, { status: 204 });
-    }
-
-    return c.json(bodies, Math.max(...responses.map((response) => response.status)) as 200);
-  }
-
-  const result = await handleMcpMessage(c, payload);
-
-  if (!result) {
-    return new Response(null, { status: 204 });
-  }
-
-  return c.json(result.body, result.status as 200);
-});
 
 const worker = {
-  async fetch(request: Request, env: Bindings, ctx: ExecutionContext) {
-    if (isLocalDemoSeedEnabled(env)) {
-      await ensureLocalDemoSeed(env);
-    }
-
-    return app.fetch(request, env, ctx);
+  async fetch(request: Request, env: WorkerBindings, ctx: ExecutionContext) {
+    return fetchEdgeEverApp(request, {
+      ...env,
+      storage: createCloudflareStorageAdapter(env),
+    }, ctx);
   },
-  async scheduled(controller: ScheduledController, env: Bindings, ctx: ExecutionContext) {
-    if (!isDemoMode(env)) {
+  async scheduled(controller: ScheduledController, env: WorkerBindings, ctx: ExecutionContext) {
+    const runtimeEnv = {
+      ...env,
+      storage: createCloudflareStorageAdapter(env),
+    } as Bindings;
+
+    if (!isDemoMode(runtimeEnv)) {
       return;
     }
 
-    ctx.waitUntil(resetDemoData(env, controller.scheduledTime));
+    ctx.waitUntil(resetDemoData(runtimeEnv, controller.scheduledTime, { resetCredentials: true }));
   },
 };
 
@@ -2380,504 +654,57 @@ app.notFound((c) =>
   )
 );
 
+app.onError((error, c) => {
+  if (error instanceof AppError) {
+    return apiError(c, error.code, error.message, error.status);
+  }
+
+  if (isDatabaseNotReadyError(error)) {
+    console.error("EdgeEver database readiness check failed", error);
+    return databaseNotReady(c);
+  }
+
+  console.error("Unhandled EdgeEver API error", error);
+  return apiError(c, "internal_error", "An unexpected server error occurred.", 500);
+});
+
 export default worker;
 
-type JsonRpcRequest = {
-  jsonrpc?: string;
-  id?: string | number | null;
-  method?: string;
-  params?: unknown;
+type McpInputSchema<T> = {
+  safeParse: (input: unknown) =>
+    | { success: true; data: T }
+    | { success: false; error: { issues: Array<{ path: PropertyKey[]; message: string }> } };
 };
 
-type JsonRpcId = string | number | null;
-type JsonRpcHandlerResult = {
-  body: unknown;
-  status: number;
+const parseMcpInput = <T>(schema: McpInputSchema<T>, input: unknown): T => {
+  const result = schema.safeParse(input);
+  if (result.success) return result.data;
+  const message = result.error.issues
+    .map((issue) => `${issue.path.join(".") || "arguments"}: ${issue.message}`)
+    .join("; ");
+  throw new AppError("invalid_params", message, 400);
 };
 
-class AppError extends Error {
-  code: string;
-  status: number;
-
-  constructor(code: string, message: string, status = 400) {
-    super(message);
-    this.name = "AppError";
-    this.code = code;
-    this.status = status;
+const assertMcpMutationAllowed = (environment: Bindings) => {
+  if (isDemoMode(environment)) {
+    throw new AppError("forbidden", "Templates and AI instructions cannot be changed in demo mode.", 403);
   }
-}
-
-const MCP_PROTOCOL_VERSION = "2024-11-05";
-
-const handleMcpMessage = async (c: AppContext, payload: unknown): Promise<JsonRpcHandlerResult | null> => {
-  const request = payload as JsonRpcRequest;
-  const id = getJsonRpcId(payload);
-  const isNotification =
-    payload &&
-    typeof payload === "object" &&
-    !("id" in payload) &&
-    typeof (payload as JsonRpcRequest).method === "string";
-
-  if (!request || request.jsonrpc !== "2.0" || typeof request.method !== "string") {
-    return { body: jsonRpcError(id, -32600, "Invalid Request"), status: 400 };
-  }
-
-  if (request.method === "notifications/initialized" && isNotification) {
-    return null;
-  }
-
-  if (request.method === "initialize") {
-    return {
-      body: jsonRpcResult(request.id ?? null, {
-        protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: {
-          tools: {
-            listChanged: false,
-          },
-        },
-        serverInfo: {
-          name: "edgeever",
-          version: "0.1.0",
-        },
-        instructions:
-          "Use scoped EdgeEver API tokens. Prefer read-only scopes for search/list/get tools and grant write scopes only to agents that modify notes.",
-      }),
-      status: 200,
-    };
-  }
-
-  const auth = await authenticateRequest(c, true);
-
-  if (!auth) {
-    return { body: jsonRpcError(request.id ?? null, -32001, "Authentication required"), status: 401 };
-  }
-
-  c.set("auth", auth);
-
-  if (request.method === "tools/list") {
-    return {
-      body: jsonRpcResult(request.id ?? null, {
-        tools: MCP_TOOLS,
-      }),
-      status: 200,
-    };
-  }
-
-  if (request.method === "tools/call") {
-    const params = asRecord(request.params);
-    const name = getOptionalString(params.name);
-
-    if (!name) {
-      return { body: jsonRpcError(request.id ?? null, -32602, "Tool name is required"), status: 400 };
-    }
-
-    try {
-      const result = await callMcpTool(c, auth, name, asRecord(params.arguments));
-      return {
-        body: jsonRpcResult(request.id ?? null, {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(result, null, 2),
-            },
-          ],
-          isError: false,
-        }),
-        status: 200,
-      };
-    } catch (error) {
-      const mapped = mapMcpToolError(error);
-      return {
-        body: jsonRpcError(request.id ?? null, mapped.rpcCode, mapped.message, mapped.data),
-        status: mapped.status,
-      };
-    }
-  }
-
-  if (isNotification) {
-    return null;
-  }
-
-  return { body: jsonRpcError(request.id ?? null, -32601, "Method not found"), status: 404 };
 };
 
-const mapMcpToolError = (error: unknown) => {
-  if (error instanceof AppError) {
-    const rpcCode =
-      error.status === 401
-        ? -32001
-        : error.status === 403
-          ? -32003
-          : error.status === 404
-            ? -32004
-            : error.status === 409
-              ? -32009
-              : -32602;
-
-    return {
-      rpcCode,
-      status: error.status,
-      message: error.message,
-      data: {
-        code: error.code,
-      },
-    };
-  }
-
-  return {
-    rpcCode: -32000,
-    status: 400,
-    message: error instanceof Error ? error.message : "Tool call failed",
-    data: undefined,
-  };
-};
-
-const MCP_TOOLS = [
-  {
-    name: "search_memos",
-    description: "Search active EdgeEver memos by text, tag, notebook, time range, pin state, or resource presence.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        query: { type: "string" },
-        notebookId: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        createdAfter: { type: "string", format: "date-time" },
-        createdBefore: { type: "string", format: "date-time" },
-        updatedAfter: { type: "string", format: "date-time" },
-        updatedBefore: { type: "string", format: "date-time" },
-        isPinned: { type: "boolean" },
-        hasResources: { type: "boolean" },
-        limit: { type: "integer", minimum: 1, maximum: 50 },
-      },
-    },
-  },
-  {
-    name: "list_memos",
-    description: "List EdgeEver memos with pagination. Use includeContent when full Markdown is needed.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        notebookId: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 100 },
-        offset: { type: "integer", minimum: 0 },
-        includeContent: { type: "boolean" },
-        includeDeleted: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "get_memo",
-    description: "Read a memo with Markdown content.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        includeDeleted: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "create_memo",
-    description: "Create a memo in a notebook.",
-    inputSchema: {
-      type: "object",
-      required: ["notebookId"],
-      additionalProperties: false,
-      properties: {
-        notebookId: { type: "string" },
-        title: { type: "string" },
-        contentMarkdown: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        createdAt: { type: "string", format: "date-time" },
-        updatedAt: { type: "string", format: "date-time" },
-      },
-    },
-  },
-  {
-    name: "update_memo",
-    description: "Update memo title, Markdown, tags, notebook, or pinned state.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        title: { type: "string" },
-        isPinned: { type: "boolean" },
-        contentMarkdown: { type: "string" },
-        tags: { type: "array", items: { type: "string" } },
-        notebookId: { type: "string" },
-        expectedRevision: { type: "integer", minimum: 0 },
-        createdAt: { type: "string", format: "date-time" },
-        updatedAt: { type: "string", format: "date-time" },
-      },
-    },
-  },
-  {
-    name: "trash_memos",
-    description: "Move one or more active memos to trash. Use dryRun to preview affected memos.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "restore_memos",
-    description: "Restore one or more trashed memos. If the original notebook is gone, memos are restored to the default inbox.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "move_memos",
-    description: "Move one or more active memos to another notebook. Use dryRun to preview affected memos.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds", "notebookId"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-        notebookId: { type: "string" },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "add_tags_to_memos",
-    description: "Add tags to one or more active memos. Use dryRun to preview changed tags.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds", "tags"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-        tags: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "remove_tags_from_memos",
-    description: "Remove tags from one or more active memos. Use dryRun to preview changed tags.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds", "tags"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 1, maxItems: 100, items: { type: "string" } },
-        tags: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "rename_tag",
-    description: "Rename a tag across all active memos. This merges into an existing tag with the same normalized name.",
-    inputSchema: {
-      type: "object",
-      required: ["from", "to"],
-      additionalProperties: false,
-      properties: {
-        from: { type: "string" },
-        to: { type: "string" },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "delete_tag",
-    description: "Remove a tag from all active memos.",
-    inputSchema: {
-      type: "object",
-      required: ["tag"],
-      additionalProperties: false,
-      properties: {
-        tag: { type: "string" },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "merge_memos",
-    description: "Merge multiple active memos into a new memo and soft-delete the sources.",
-    inputSchema: {
-      type: "object",
-      required: ["memoIds"],
-      additionalProperties: false,
-      properties: {
-        memoIds: { type: "array", minItems: 2, maxItems: 50, items: { type: "string" } },
-        notebookId: { type: "string" },
-        title: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "upload_memo_image",
-    description:
-      "Upload a base64-encoded image resource to a memo and return Markdown that can be inserted into memo content. Images are stored as provided; server-side compression is disabled to avoid Cloudflare Images quota usage.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId", "mimeType", "dataBase64"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        filename: { type: "string" },
-        mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"] },
-        dataBase64: { type: "string" },
-        alt: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "upload_memo_attachment",
-    description: "Upload a base64-encoded attachment resource to a memo and return Markdown link text that can be inserted into memo content.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId", "filename", "mimeType", "dataBase64"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        filename: { type: "string" },
-        mimeType: { type: "string" },
-        dataBase64: { type: "string" },
-        label: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "list_memo_resources",
-    description: "List active resources attached to a memo.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-      },
-    },
-  },
-  {
-    name: "list_resources",
-    description: "List active workspace resources with storage summary.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        limit: { type: "integer", minimum: 1, maximum: 500 },
-      },
-    },
-  },
-  {
-    name: "list_memo_revisions",
-    description: "List revision history for a memo.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        limit: { type: "integer", minimum: 1, maximum: 100 },
-      },
-    },
-  },
-  {
-    name: "restore_memo_revision",
-    description: "Restore a memo to a previous revision. Use dryRun to preview the target revision.",
-    inputSchema: {
-      type: "object",
-      required: ["memoId", "revisionId"],
-      additionalProperties: false,
-      properties: {
-        memoId: { type: "string" },
-        revisionId: { type: "string" },
-        dryRun: { type: "boolean" },
-      },
-    },
-  },
-  {
-    name: "move_notebook",
-    description: "Move a notebook under another notebook or root and update its sort order.",
-    inputSchema: {
-      type: "object",
-      required: ["notebookId"],
-      additionalProperties: false,
-      properties: {
-        notebookId: { type: "string" },
-        parentId: { type: ["string", "null"] },
-        sortOrder: { type: "integer" },
-      },
-    },
-  },
-  {
-    name: "create_notebook",
-    description: "Create a notebook at the root or under another notebook.",
-    inputSchema: {
-      type: "object",
-      required: ["name"],
-      additionalProperties: false,
-      properties: {
-        name: { type: "string", minLength: 1, maxLength: 80 },
-        parentId: { type: ["string", "null"] },
-        sortOrder: { type: "integer" },
-      },
-    },
-  },
-  {
-    name: "list_notebooks",
-    description: "List active notebooks.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-    },
-  },
-  {
-    name: "list_tags",
-    description: "List tags and memo counts.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-    },
-  },
-  {
-    name: "get_workspace_stats",
-    description: "Get notebook, memo, tag, and resource counts for workspace diagnostics.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,
-      properties: {},
-    },
-  },
-];
-
-const callMcpTool = async (
+export const callMcpTool = async (
   c: AppContext,
   auth: AuthContext,
   name: string,
   args: Record<string, unknown>
 ) => {
   switch (name) {
+    case "get_current_user": {
+      return await getCurrentWorkspaceIdentity(c.env.storage.db, auth);
+    }
     case "search_memos": {
       assertScope(auth, "read:memos");
       return {
-        memos: await searchMemoSummaries(c.env.DB, {
+        memos: await searchMemoSummaries(c.env.storage.db, {
           workspaceId: auth.workspaceId,
           query: getOptionalString(args.query),
           notebookId: getOptionalString(args.notebookId),
@@ -2894,7 +721,7 @@ const callMcpTool = async (
     }
     case "list_memos": {
       assertScope(auth, "read:memos");
-      return await listMemosForMcp(c.env.DB, {
+      return await listMemosForMcp(c.env.storage.db, {
         workspaceId: auth.workspaceId,
         notebookId: getOptionalString(args.notebookId),
         limit: clampNumber(Number(args.limit ?? 50), 1, 100),
@@ -2906,7 +733,7 @@ const callMcpTool = async (
     case "get_memo": {
       assertScope(auth, "read:memos");
       const memoId = getRequiredString(args.memoId, "memoId");
-      const memo = await getMemoDetail(c.env.DB, auth.workspaceId, memoId, args.includeDeleted === true);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId, args.includeDeleted === true);
 
       if (!memo) {
         throw new Error("Memo not found");
@@ -2919,7 +746,7 @@ const callMcpTool = async (
       const notebookId = getRequiredString(args.notebookId, "notebookId");
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
-      const memo = await createMemoRecord(c.env.DB, auth.workspaceId, {
+      const memo = await createMemoRecord(c.env.storage.db, auth.workspaceId, {
         notebookId,
         title: getOptionalString(args.title) ?? undefined,
         contentMarkdown: getOptionalString(args.contentMarkdown) ?? "",
@@ -2930,13 +757,24 @@ const callMcpTool = async (
 
       return { memo };
     }
+    case "import_memos": {
+      assertScope(auth, "write:memos");
+      return await importMemosRecord(c.env.storage.db, auth.workspaceId, {
+        source: getRequiredString(args.source, "source"),
+        notebookId: getRequiredString(args.notebookId, "notebookId"),
+        items: args.items,
+        dryRun: args.dryRun === true,
+        actor: getAuditActor(c),
+        actorLabel: getActorLabel(c),
+      });
+    }
     case "update_memo": {
       assertScope(auth, "write:memos");
       const memoId = getRequiredString(args.memoId, "memoId");
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
       const result = await updateMemoRecord(
-        c.env.DB,
+        c.env.storage.db,
         auth.workspaceId,
         memoId,
         {
@@ -2967,10 +805,10 @@ const callMcpTool = async (
       const memoIds = getRequiredStringArray(args.memoIds, "memoIds");
 
       if (args.dryRun === true) {
-        return { dryRun: true, memos: await getMemosForBulkAction(c.env.DB, auth.workspaceId, memoIds, 0) };
+        return { dryRun: true, memos: await getMemosForBulkAction(c.env.storage.db, auth.workspaceId, memoIds, 0) };
       }
 
-      const deleted = await deleteMemosRecord(c.env.DB, c.env.RESOURCES, auth.workspaceId, memoIds, false, getAuditActor(c));
+      const deleted = await deleteMemosRecord(c.env, auth.workspaceId, memoIds, false, getAuditActor(c));
       return { ok: true, deleted };
     }
     case "restore_memos": {
@@ -2978,16 +816,16 @@ const callMcpTool = async (
       const memoIds = getRequiredStringArray(args.memoIds, "memoIds");
 
       if (args.dryRun === true) {
-        return { dryRun: true, memos: await getMemosForBulkAction(c.env.DB, auth.workspaceId, memoIds, 1) };
+        return { dryRun: true, memos: await getMemosForBulkAction(c.env.storage.db, auth.workspaceId, memoIds, 1) };
       }
 
-      const restored = await restoreMemosRecord(c.env.DB, auth.workspaceId, memoIds, getAuditActor(c));
+      const restored = await restoreMemosRecord(c.env.storage.db, auth.workspaceId, memoIds, getAuditActor(c));
       return { ok: true, restored };
     }
     case "upload_memo_image": {
       assertScope(auth, "write:resources");
       const memoId = getRequiredString(args.memoId, "memoId");
-      const memo = await getMemoDetail(c.env.DB, auth.workspaceId, memoId);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
 
       if (!memo) {
         throw new AppError("not_found", "Memo not found", 404);
@@ -3015,25 +853,25 @@ const callMcpTool = async (
       assertScope(auth, "write:memos");
       const notebookId = getRequiredString(args.notebookId, "notebookId");
       const memoIds = getRequiredStringArray(args.memoIds, "memoIds");
-      const target = await getNotebook(c.env.DB, auth.workspaceId, notebookId);
+      const target = await getNotebook(c.env.storage.db, auth.workspaceId, notebookId);
 
       if (!target) {
         throw new AppError("not_found", "Target notebook not found", 404);
       }
 
       if (args.dryRun === true) {
-        return { dryRun: true, targetNotebook: target, memos: await getMemosForBulkAction(c.env.DB, auth.workspaceId, memoIds, 0) };
+        return { dryRun: true, targetNotebook: target, memos: await getMemosForBulkAction(c.env.storage.db, auth.workspaceId, memoIds, 0) };
       }
 
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
-      const moved = await moveMemosToNotebook(c.env.DB, auth.workspaceId, memoIds, notebookId, actor, actorLabel);
+      const moved = await moveMemosToNotebook(c.env.storage.db, auth.workspaceId, memoIds, notebookId, actor, actorLabel);
 
       return { ok: true, moved };
     }
     case "add_tags_to_memos": {
       assertScope(auth, "write:tags");
-      return await updateTagsForMemos(c.env.DB, {
+      return await updateTagsForMemos(c.env.storage.db, {
         workspaceId: auth.workspaceId,
         memoIds: getRequiredStringArray(args.memoIds, "memoIds"),
         tags: getRequiredStringArray(args.tags, "tags"),
@@ -3045,7 +883,7 @@ const callMcpTool = async (
     }
     case "remove_tags_from_memos": {
       assertScope(auth, "write:tags");
-      return await updateTagsForMemos(c.env.DB, {
+      return await updateTagsForMemos(c.env.storage.db, {
         workspaceId: auth.workspaceId,
         memoIds: getRequiredStringArray(args.memoIds, "memoIds"),
         tags: getRequiredStringArray(args.tags, "tags"),
@@ -3061,10 +899,10 @@ const callMcpTool = async (
       const to = getRequiredString(args.to, "to");
 
       if (args.dryRun === true) {
-        return await previewTagRename(c.env.DB, auth.workspaceId, from, to);
+        return await previewTagRename(c.env.storage.db, auth.workspaceId, from, to);
       }
 
-      const updated = await updateTagAcrossMemos(c.env.DB, auth.workspaceId, from, to, getAuditActor(c), getActorLabel(c));
+      const updated = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, from, to, getAuditActor(c), getActorLabel(c));
       return { ok: true, updated };
     }
     case "delete_tag": {
@@ -3072,10 +910,10 @@ const callMcpTool = async (
       const tag = getRequiredString(args.tag, "tag");
 
       if (args.dryRun === true) {
-        return await previewTagRename(c.env.DB, auth.workspaceId, tag, null);
+        return await previewTagRename(c.env.storage.db, auth.workspaceId, tag, null);
       }
 
-      const updated = await updateTagAcrossMemos(c.env.DB, auth.workspaceId, tag, null, getAuditActor(c), getActorLabel(c));
+      const updated = await updateTagAcrossMemos(c.env.storage.db, auth.workspaceId, tag, null, getAuditActor(c), getActorLabel(c));
       return { ok: true, updated };
     }
     case "merge_memos": {
@@ -3083,7 +921,7 @@ const callMcpTool = async (
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
       const memo = await mergeMemosRecord(
-        c.env.DB,
+        c.env.storage.db,
         auth.workspaceId,
         {
           memoIds: getRequiredStringArray(args.memoIds, "memoIds"),
@@ -3099,7 +937,7 @@ const callMcpTool = async (
     case "upload_memo_attachment": {
       assertScope(auth, "write:resources");
       const memoId = getRequiredString(args.memoId, "memoId");
-      const memo = await getMemoDetail(c.env.DB, auth.workspaceId, memoId);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
 
       if (!memo) {
         throw new AppError("not_found", "Memo not found", 404);
@@ -3124,23 +962,23 @@ const callMcpTool = async (
     case "list_memo_resources": {
       assertScope(auth, "read:resources");
       const memoId = getRequiredString(args.memoId, "memoId");
-      const memo = await getMemoDetail(c.env.DB, auth.workspaceId, memoId, true);
+      const memo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId, true);
 
       if (!memo) {
         throw new AppError("not_found", "Memo not found", 404);
       }
 
-      return { resources: await listResourcesForMemo(c.env.DB, auth.workspaceId, memoId) };
+      return { resources: await listResourcesForMemo(c.env.storage.db, auth.workspaceId, memoId) };
     }
     case "list_resources": {
       assertScope(auth, "read:resources");
-      return await listResourcesForMcp(c.env.DB, auth.workspaceId, clampNumber(Number(args.limit ?? 100), 1, 500));
+      return await listResourcesForMcp(c.env.storage.db, auth.workspaceId, clampNumber(Number(args.limit ?? 100), 1, 500));
     }
     case "list_memo_revisions": {
       assertScope(auth, "read:memos");
       return {
         revisions: await listMemoRevisions(
-          c.env.DB,
+          c.env.storage.db,
           auth.workspaceId,
           getRequiredString(args.memoId, "memoId"),
           clampNumber(Number(args.limit ?? 50), 1, 100)
@@ -3151,7 +989,7 @@ const callMcpTool = async (
       assertScope(auth, "write:memos");
       const memoId = getRequiredString(args.memoId, "memoId");
       const revisionId = getRequiredString(args.revisionId, "revisionId");
-      const revision = await getMemoRevisionRow(c.env.DB, auth.workspaceId, memoId, revisionId);
+      const revision = await getMemoRevisionRow(c.env.storage.db, auth.workspaceId, memoId, revisionId);
 
       if (!revision) {
         throw new AppError("not_found", "Memo revision not found", 404);
@@ -3161,13 +999,13 @@ const callMcpTool = async (
         return { dryRun: true, revision: mapMemoRevision(revision) };
       }
 
-      return { memo: await restoreMemoRevisionRecord(c.env.DB, auth.workspaceId, memoId, revisionId, getAuditActor(c), getActorLabel(c)) };
+      return { memo: await restoreMemoRevisionRecord(c.env.storage.db, auth.workspaceId, memoId, revisionId, getAuditActor(c), getActorLabel(c)) };
     }
     case "move_notebook": {
       assertScope(auth, "write:notebooks");
       const actor = getAuditActor(c);
       const notebook = await updateNotebookRecord(
-        c.env.DB,
+        c.env.storage.db,
         auth.workspaceId,
         getRequiredString(args.notebookId, "notebookId"),
         {
@@ -3189,7 +1027,7 @@ const callMcpTool = async (
       }
 
       const notebook = await createNotebookRecord(
-        c.env.DB,
+        c.env.storage.db,
         auth.workspaceId,
         {
           name,
@@ -3201,113 +1039,391 @@ const callMcpTool = async (
 
       return { notebook };
     }
+    case "rename_notebook": {
+      assertScope(auth, "write:notebooks");
+      const name = getRequiredString(args.name, "name");
+
+      if (name.length > 80) {
+        throw new AppError("invalid_params", "name must be at most 80 characters", 400);
+      }
+
+      const notebook = await updateNotebookRecord(
+        c.env.storage.db,
+        auth.workspaceId,
+        getRequiredString(args.notebookId, "notebookId"),
+        { name },
+        getAuditActor(c)
+      );
+
+      return { notebook };
+    }
+    case "get_notebook": {
+      assertScope(auth, "read:notebooks");
+      const notebook = await getNotebook(c.env.storage.db, auth.workspaceId, getRequiredString(args.notebookId, "notebookId"));
+      if (!notebook) {
+        throw new AppError("not_found", "Notebook not found in the authenticated user's workspace.", 404);
+      }
+      return { notebook };
+    }
+    case "find_notebooks": {
+      assertScope(auth, "read:notebooks");
+      return {
+        notebooks: await findNotebooks(c.env.storage.db, auth.workspaceId, {
+          name: getRequiredString(args.name, "name"),
+          parentId: Object.hasOwn(args, "parentId")
+            ? args.parentId === null
+              ? null
+              : getRequiredString(args.parentId, "parentId")
+            : undefined,
+          exact: args.exact === true,
+          limit: clampNumber(Number(args.limit ?? 20), 1, 50),
+        }),
+      };
+    }
+    case "resolve_notebook_path": {
+      assertScope(auth, "read:notebooks");
+      return await resolveNotebookPath(c.env.storage.db, auth.workspaceId, getRequiredString(args.path, "path"));
+    }
     case "list_notebooks": {
       assertScope(auth, "read:notebooks");
-      return { notebooks: await listNotebooks(c.env.DB, auth.workspaceId) };
+      return { notebooks: await listNotebooks(c.env.storage.db, auth.workspaceId) };
     }
     case "list_tags": {
       assertScope(auth, "read:tags");
-      return { tags: await listTagSummaries(c.env.DB, auth.workspaceId) };
+      return { tags: await listTagSummaries(c.env.storage.db, auth.workspaceId) };
     }
     case "get_workspace_stats": {
       assertScope(auth, "read:memos");
-      return await getWorkspaceStats(c.env.DB, auth.workspaceId);
+      return await getWorkspaceStats(c.env.storage.db, auth.workspaceId);
+    }
+    case "list_note_templates": {
+      assertScope(auth, "read:memos");
+      return { templates: await listMemoTemplates(c.env.storage.db, auth.workspaceId) };
+    }
+    case "get_note_template": {
+      assertScope(auth, "read:memos");
+      const template = await getMemoTemplate(
+        c.env.storage.db,
+        auth.workspaceId,
+        getRequiredString(args.templateId, "templateId"),
+      );
+      if (!template) throw new AppError("not_found", "Template not found", 404);
+      return { template };
+    }
+    case "create_note_template": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const input = parseMcpInput(TemplateCreateSchema, args);
+      const memo = input.memoId
+        ? await getMemoDetail(c.env.storage.db, auth.workspaceId, input.memoId)
+        : null;
+      if (input.memoId && !memo) throw new AppError("not_found", "Memo not found", 404);
+
+      const id = createId("template");
+      const now = isoNow();
+      const title = memo?.title ?? (input.title?.trim() || null);
+      const contentMarkdown = memo?.contentMarkdown ?? input.contentMarkdown ?? "";
+      const tags = memo?.tags ?? input.tags ?? [];
+      const contentJson = memo?.contentJson ?? markdownToDoc(contentMarkdown);
+      await c.env.storage.db.prepare(
+        `INSERT INTO memo_templates (
+           id, workspace_id, name, description, title, content_json, content_markdown, tags_json, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        id,
+        auth.workspaceId,
+        input.name.trim(),
+        input.description?.trim() || null,
+        title,
+        JSON.stringify(contentJson),
+        contentMarkdown,
+        JSON.stringify(tags),
+        now,
+        now,
+      ).run();
+      const actor = getAuditActor(c);
+      await audit(c.env.storage.db, actor.actorType, actor.actorId, "template.create", "template", id, {
+        memoId: input.memoId ?? null,
+      });
+      return { template: await getMemoTemplate(c.env.storage.db, auth.workspaceId, id) };
+    }
+    case "update_note_template": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const templateId = getRequiredString(args.templateId, "templateId");
+      const input = parseMcpInput(TemplateUpdateSchema, args);
+      if (Object.keys(input).length === 0) {
+        throw new AppError("invalid_params", "At least one template field is required.", 400);
+      }
+      const current = await getMemoTemplate(c.env.storage.db, auth.workspaceId, templateId);
+      if (!current) throw new AppError("not_found", "Template not found", 404);
+
+      const contentMarkdown = input.contentMarkdown ?? current.contentMarkdown;
+      const contentJson = input.contentMarkdown !== undefined
+        ? markdownToDoc(contentMarkdown)
+        : current.contentJson;
+      const now = isoNow();
+      await c.env.storage.db.prepare(
+        `UPDATE memo_templates
+         SET name = ?, description = ?, title = ?, content_json = ?, content_markdown = ?, tags_json = ?, updated_at = ?
+         WHERE id = ? AND workspace_id = ?`,
+      ).bind(
+        input.name ?? current.name,
+        input.description !== undefined ? input.description?.trim() || null : current.description,
+        input.title !== undefined ? input.title?.trim() || null : current.title,
+        JSON.stringify(contentJson),
+        contentMarkdown,
+        JSON.stringify(input.tags ?? current.tags),
+        now,
+        templateId,
+        auth.workspaceId,
+      ).run();
+      const actor = getAuditActor(c);
+      await audit(c.env.storage.db, actor.actorType, actor.actorId, "template.update", "template", templateId, {});
+      return { template: await getMemoTemplate(c.env.storage.db, auth.workspaceId, templateId) };
+    }
+    case "delete_note_template": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const templateId = getRequiredString(args.templateId, "templateId");
+      const current = await getMemoTemplate(c.env.storage.db, auth.workspaceId, templateId);
+      if (!current) throw new AppError("not_found", "Template not found", 404);
+      await c.env.storage.db.prepare(
+        `DELETE FROM memo_templates WHERE id = ? AND workspace_id = ?`,
+      ).bind(templateId, auth.workspaceId).run();
+      const actor = getAuditActor(c);
+      await audit(c.env.storage.db, actor.actorType, actor.actorId, "template.delete", "template", templateId, {});
+      return { ok: true };
+    }
+    case "use_note_template": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const templateId = getRequiredString(args.templateId, "templateId");
+      const template = await getMemoTemplate(c.env.storage.db, auth.workspaceId, templateId);
+      if (!template) throw new AppError("not_found", "Template not found", 404);
+      const memo = await createMemoRecord(c.env.storage.db, auth.workspaceId, {
+        notebookId: getRequiredString(args.notebookId, "notebookId"),
+        title: template.title ?? undefined,
+        contentMarkdown: template.contentMarkdown,
+        tags: template.tags,
+      }, getAuditActor(c), getActorLabel(c));
+      const actor = getAuditActor(c);
+      await audit(c.env.storage.db, actor.actorType, actor.actorId, "template.use", "template", templateId, { memoId: memo.id });
+      return { memo };
+    }
+    case "list_ai_instructions": {
+      assertScope(auth, "read:memos");
+      return {
+        instructions: await listAiPromptTemplates(
+          c.env.storage.db,
+          auth.workspaceId,
+          getOptionalString(args.locale),
+        ),
+      };
+    }
+    case "get_ai_instruction": {
+      assertScope(auth, "read:memos");
+      const row = await getAiPromptTemplateRow(
+        c.env.storage.db,
+        auth.workspaceId,
+        getRequiredString(args.instructionId, "instructionId"),
+      );
+      if (!row) throw new AppError("not_found", "AI instruction not found", 404);
+      return { instruction: mapAiPromptTemplateRow(row, getOptionalString(args.locale)) };
+    }
+    case "create_ai_instruction": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const input = parseMcpInput(AiPromptTemplateCreateSchema, args);
+      const id = createId("aiprompt");
+      const now = isoNow();
+      const actor = getAuditActor(c);
+      await c.env.storage.db.batch([
+        c.env.storage.db.prepare(
+          `INSERT INTO ai_prompt_templates (
+             id, workspace_id, seed_key, action, parameter_kind, result_mode,
+             name, description, instruction,
+             name_customized, description_customized, instruction_customized,
+             created_at, updated_at
+           ) VALUES (?, ?, NULL, 'custom', ?, ?, ?, ?, ?, 1, 1, 1, ?, ?)`,
+        ).bind(
+          id,
+          auth.workspaceId,
+          input.parameterKind,
+          input.resultMode,
+          input.name.trim(),
+          input.description?.trim() || null,
+          input.instruction.trim(),
+          now,
+          now,
+        ),
+        auditStatement(c.env.storage.db, actor.actorType, actor.actorId, "ai_prompt.create", "ai_prompt", id, {}),
+      ]);
+      const row = await getAiPromptTemplateRow(c.env.storage.db, auth.workspaceId, id);
+      return { instruction: mapAiPromptTemplateRow(row!, getOptionalString(args.locale)) };
+    }
+    case "update_ai_instruction": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const instructionId = getRequiredString(args.instructionId, "instructionId");
+      const input = parseMcpInput(AiPromptTemplateUpdateSchema, args);
+      const current = await getAiPromptTemplateRow(c.env.storage.db, auth.workspaceId, instructionId);
+      if (!current) throw new AppError("not_found", "AI instruction not found", 404);
+
+      const now = isoNow();
+      const actor = getAuditActor(c);
+      await c.env.storage.db.batch([
+        c.env.storage.db.prepare(
+          `UPDATE ai_prompt_templates
+           SET name = ?, description = ?, instruction = ?,
+               parameter_kind = ?, result_mode = ?,
+               name_customized = ?, description_customized = ?, instruction_customized = ?,
+               updated_at = ?
+           WHERE id = ? AND workspace_id = ?`,
+        ).bind(
+          input.name?.trim() ?? current.name,
+          input.description !== undefined ? input.description?.trim() || null : current.description,
+          input.instruction?.trim() ?? current.instruction,
+          input.parameterKind ?? current.parameter_kind,
+          input.resultMode ?? current.result_mode,
+          input.name !== undefined ? 1 : current.name_customized,
+          input.description !== undefined ? 1 : current.description_customized,
+          input.instruction !== undefined ? 1 : current.instruction_customized,
+          now,
+          instructionId,
+          auth.workspaceId,
+        ),
+        auditStatement(c.env.storage.db, actor.actorType, actor.actorId, "ai_prompt.update", "ai_prompt", instructionId, {}),
+      ]);
+      const row = await getAiPromptTemplateRow(c.env.storage.db, auth.workspaceId, instructionId);
+      return { instruction: mapAiPromptTemplateRow(row!, getOptionalString(args.locale)) };
+    }
+    case "delete_ai_instruction": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const instructionId = getRequiredString(args.instructionId, "instructionId");
+      const current = await getAiPromptTemplateRow(c.env.storage.db, auth.workspaceId, instructionId);
+      if (!current) throw new AppError("not_found", "AI instruction not found", 404);
+      const actor = getAuditActor(c);
+      await c.env.storage.db.batch([
+        c.env.storage.db.prepare(
+          `DELETE FROM ai_prompt_templates WHERE id = ? AND workspace_id = ?`,
+        ).bind(instructionId, auth.workspaceId),
+        auditStatement(c.env.storage.db, actor.actorType, actor.actorId, "ai_prompt.delete", "ai_prompt", instructionId, {}),
+      ]);
+      return { ok: true };
+    }
+    case "restore_default_ai_instructions": {
+      assertScope(auth, "write:memos");
+      assertMcpMutationAllowed(c.env);
+      const result = await restoreMissingDefaultAiPrompts(c.env.storage.db, auth.workspaceId);
+      if (result.restoredCount > 0) {
+        const actor = getAuditActor(c);
+        await audit(c.env.storage.db, actor.actorType, actor.actorId, "ai_prompt.restore_defaults", "workspace", auth.workspaceId, result);
+      }
+      return {
+        ...result,
+        instructions: await listAiPromptTemplates(
+          c.env.storage.db,
+          auth.workspaceId,
+          getOptionalString(args.locale),
+        ),
+      };
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 };
 
-const jsonRpcResult = (id: JsonRpcId, result: unknown) => ({
-  jsonrpc: "2.0",
-  id,
-  result,
-});
-
-const jsonRpcError = (id: JsonRpcId, code: number, message: string, data?: unknown) => ({
-  jsonrpc: "2.0",
-  id,
-  error: {
-    code,
-    message,
-    ...(data === undefined ? {} : { data }),
-  },
-});
-
-const getJsonRpcId = (request: unknown): JsonRpcId => {
-  if (!request || typeof request !== "object" || !("id" in request)) {
-    return null;
+const getInstanceAuthMode = async (
+  env: Bindings,
+  verifyDatabase = false,
+): Promise<InstanceAuthMode> => {
+  if (!env.storage.db || typeof env.storage.db.prepare !== "function") {
+    throw new AppError(
+      "database_not_ready",
+      "Database is not ready. Bind the D1 database as DB and apply the remote migrations.",
+      503,
+    );
   }
 
-  const id = (request as { id?: unknown }).id;
-  return typeof id === "string" || typeof id === "number" || id === null ? id : null;
-};
+  const allowUnauthenticated = isUnauthenticatedAccessEnabled(env.EDGE_EVER_ALLOW_UNAUTHENTICATED);
+  const bootstrapCredentialConfigured = hasBootstrapCredential(
+    env.EDGE_EVER_AUTH_PASSWORD,
+    env.EDGE_EVER_AUTH_PASSWORD_HASH,
+  );
 
-const asRecord = (value: unknown): Record<string, unknown> =>
-  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-
-const getOptionalString = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
-
-const getRequiredString = (value: unknown, name: string) => {
-  const parsed = getOptionalString(value);
-
-  if (!parsed) {
-    throw new AppError("invalid_params", `${name} is required`, 400);
+  if (!verifyDatabase) {
+    if (allowUnauthenticated) return "disabled";
+    if (bootstrapCredentialConfigured) return "required";
   }
 
-  return parsed;
-};
-
-const getOptionalStringArray = (value: unknown) =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-
-const getRequiredStringArray = (value: unknown, name: string) => {
-  const items = getOptionalStringArray(value);
-
-  if (items.length === 0) {
-    throw new AppError("invalid_params", `${name} must include at least one item`, 400);
-  }
-
-  return items;
-};
-
-const decodeBase64Data = async (value: string) => {
-  const [, dataUrlPayload] = value.match(/^data:[^;]+;base64,(.+)$/i) ?? [];
-  const base64 = (dataUrlPayload ?? value).replace(/\s/g, "");
-
-  if (!base64) {
-    throw new AppError("invalid_params", "dataBase64 is required", 400);
-  }
-
+  let user: { id: string } | null;
   try {
-    const response = await fetch("data:application/octet-stream;base64," + base64);
-    if (!response.ok) {
-      throw new Error("failed to decode base64");
-    }
-    return new Uint8Array(await response.arrayBuffer());
+    user = await env.storage.db.prepare(`SELECT id FROM users WHERE is_disabled = 0 LIMIT 1`).first<{ id: string }>();
   } catch (error) {
-    throw new AppError("invalid_params", "dataBase64 must be valid base64 data: " + (error as Error).message, 400);
+    if (isDatabaseNotReadyError(error)) {
+      throw new AppError(
+        "database_not_ready",
+        "Database is not ready. Bind the D1 database as DB and apply the remote migrations.",
+        503,
+      );
+    }
+    throw error;
   }
+
+  return resolveInstanceAuthMode({
+    allowUnauthenticated,
+    hasBootstrapCredential: bootstrapCredentialConfigured,
+    hasEnabledUser: Boolean(user),
+  });
 };
 
-const escapeMarkdownImageAlt = (value: string) => value.replace(/[\\[\]]/g, "\\$&");
-const escapeMarkdownLinkLabel = (value: string) => value.replace(/[\\[\]]/g, "\\$&");
+const getLoginAttemptKeys = async (c: AppContext, username: string): Promise<LoginAttemptKey[]> => {
+  const keys: LoginAttemptKey[] = [{ scope: "username", key: await sha256(username.trim()) }];
+  const clientIp = getClientIp(c);
 
-const isAuthRequired = async (env: Bindings) => {
-  if (hasBootstrapCredential(env.EDGE_EVER_AUTH_PASSWORD, env.EDGE_EVER_AUTH_PASSWORD_HASH)) {
-    return true;
+  if (clientIp) {
+    keys.push({ scope: "ip", key: await sha256(clientIp) });
   }
 
-  const user = await env.DB.prepare(`SELECT id FROM users WHERE is_disabled = 0 LIMIT 1`).first<{ id: string }>();
-  return Boolean(user);
+  return keys;
+};
+
+const getClientIp = (c: Context) => {
+  const cloudflareIp = c.req.header("CF-Connecting-IP")?.trim();
+  if (cloudflareIp) return cloudflareIp;
+
+  const realIp = c.req.header("X-Real-IP")?.trim();
+  if (realIp) return realIp;
+
+  const forwardedIp = c.req.header("X-Forwarded-For")?.split(",", 1)[0]?.trim();
+  return forwardedIp || null;
+};
+
+const tooManyLoginAttempts = (c: Context, retryAfterSeconds: number) => {
+  c.header("Retry-After", String(retryAfterSeconds));
+  return apiError(c, "login_rate_limited", "Too many login attempts. Try again later.", 429);
 };
 
 const verifyLogin = async (env: Bindings, username: string, password: string): Promise<UserRow | null> => {
   const normalizedUsername = username.trim();
-  const existingUser = await getUserByUsername(env.DB, normalizedUsername);
+  const existingUser = await getUserByUsername(env.storage.db, normalizedUsername);
 
   if (existingUser) {
-    return (await verifyPassword(password, existingUser.password_hash)) ? existingUser : null;
+    if (await verifyPassword(password, existingUser.password_hash)) {
+      return existingUser;
+    }
+
+    if (!isSupportedPasswordHash(existingUser.password_hash)) {
+      throw new AppError(
+        "password_hash_invalid",
+        "This account has an invalid password hash. Reset it with the EdgeEver password reset command.",
+        503,
+      );
+    }
+
+    return null;
   }
 
   const configuredHash = env.EDGE_EVER_AUTH_PASSWORD_HASH?.trim();
@@ -3338,17 +1454,17 @@ const verifyLogin = async (env: Bindings, username: string, password: string): P
   const userId = createId("usr");
   const passwordHash = await hashPassword(password);
 
-  await env.DB.prepare(
+  await env.storage.db.prepare(
     `INSERT OR IGNORE INTO users (id, username, password_hash, display_name, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?)`
   )
     .bind(userId, normalizedUsername, passwordHash, normalizedUsername, now, now)
     .run();
 
-  return getUserByUsername(env.DB, normalizedUsername);
+  return getUserByUsername(env.storage.db, normalizedUsername);
 };
 
-const getUserByUsername = async (db: D1Database, username: string) =>
+const getUserByUsername = async (db: DatabaseAdapter, username: string) =>
   db
     .prepare(
       `SELECT id, username, password_hash, display_name, is_disabled
@@ -3367,84 +1483,31 @@ const getInstanceUser = (db: D1Database, userId: string) =>
      WHERE u.id = ?`
   ).bind(userId).first<InstanceUserRow>();
 
-const mapInstanceUser = (row: InstanceUserRow): InstanceUser => ({
-  id: row.id,
-  username: row.username,
-  displayName: row.display_name,
-  role: row.role,
-  isDisabled: Boolean(row.is_disabled),
-  lastLoginAt: row.last_login_at,
-  createdAt: row.created_at,
-});
-
-const ensureUserWorkspace = async (db: D1Database, userId: string, username: string) => {
-  const existing = await db.prepare(
-    `SELECT workspace_id, role FROM workspace_members WHERE user_id = ? LIMIT 1`
-  ).bind(userId).first<{ workspace_id: string; role: "owner" | "member" }>();
-  if (existing) return { workspaceId: existing.workspace_id, role: existing.role };
-
-  const defaultOwner = await db.prepare(
-    `SELECT user_id FROM workspace_members WHERE workspace_id = ? LIMIT 1`
-  ).bind(DEFAULT_WORKSPACE_ID).first<{ user_id: string }>();
-  if (!defaultOwner) {
-    await db.prepare(
-      `INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')`
-    ).bind(DEFAULT_WORKSPACE_ID, userId).run();
-    const claimed = await db.prepare(
-      `SELECT workspace_id, role FROM workspace_members WHERE user_id = ? LIMIT 1`
-    ).bind(userId).first<{ workspace_id: string; role: "owner" | "member" }>();
-    if (claimed) return { workspaceId: claimed.workspace_id, role: claimed.role };
-  }
-
-  const workspaceId = createId("ws");
-  const now = isoNow();
-  const notebooks = createDefaultNotebookRows(workspaceId, now);
-  await db.batch([
-    db.prepare(`INSERT INTO workspaces (id, name, is_personal, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`)
-      .bind(workspaceId, `${username}'s workspace`, now, now),
-    db.prepare(`INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, 'member', ?)`)
-      .bind(workspaceId, userId, now),
-    ...notebooks.map((notebook) => db.prepare(
-      `INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, icon, color, sort_order, created_at, updated_at)
-       VALUES (?, ?, NULL, ?, ?, 'notebook', ?, ?, ?, ?)`
-    ).bind(notebook.id, workspaceId, notebook.name, notebook.slug, notebook.color, notebook.sortOrder, now, now)),
-  ]);
-  return { workspaceId, role: "member" as const };
-};
-
-const createDefaultNotebookRows = (workspaceId: string, _now: string) => [
-  { id: `${workspaceId}_inbox`, name: "等待分类", slug: "inbox", color: "#0f766e", sortOrder: 10 },
-  { id: `${workspaceId}_projects`, name: "工作项目", slug: "work-projects", color: "#2563eb", sortOrder: 20 },
-  { id: `${workspaceId}_learning`, name: "学习资料", slug: "learning-resources", color: "#7c3aed", sortOrder: 30 },
-  { id: `${workspaceId}_creative`, name: "灵感创作", slug: "creative-ideas", color: "#db2777", sortOrder: 40 },
-  { id: `${workspaceId}_personal`, name: "生活个人", slug: "personal-life", color: "#ea580c", sortOrder: 50 },
-];
-
-const createSession = async (c: AppContext, user: UserRow) => {
+const createSession = async (c: AppContext, user: UserRow, requestedDeviceId?: string) => {
   const token = randomToken(SESSION_TOKEN_BYTES);
   const id = createId("sess");
   const now = isoNow();
   const maxAge = getSessionMaxAge(c.env);
   const expiresAt = new Date(Date.now() + maxAge * 1000).toISOString();
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const deviceId = resolveSessionDeviceId(requestedDeviceId, userAgent, id);
   const ip = c.req.header("CF-Connecting-IP");
   const ipHash = ip ? await sha256(ip) : null;
+  const cf = c.req.raw.cf as { country?: string; region?: string } | undefined;
+  const ipCountry = c.req.header("CF-IPCountry") ?? cf?.country ?? null;
+  const ipRegion = cf?.region ?? null;
 
-  await c.env.DB.prepare(
-    `INSERT INTO sessions (
-      id, user_id, token_hash, user_agent, ip_hash, expires_at, created_at, last_seen_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  )
-    .bind(
-      id,
-      user.id,
-      await sha256(token),
-      c.req.header("User-Agent") ?? null,
-      ipHash,
-      expiresAt,
-      now,
-      now
-    )
-    .run();
+  await c.env.storage.db.batch([
+    c.env.storage.db.prepare(
+      `UPDATE sessions SET revoked_at = ?
+       WHERE user_id = ? AND device_id = ? AND revoked_at IS NULL`
+    ).bind(now, user.id, deviceId),
+    c.env.storage.db.prepare(
+      `INSERT INTO sessions (
+        id, user_id, token_hash, device_id, user_agent, ip_hash, device_label, ip_address, ip_country, ip_region, expires_at, created_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(id, user.id, await sha256(token), deviceId, userAgent, ipHash, null, ip ?? null, ipCountry, ipRegion, expiresAt, now, now),
+  ]);
 
   return { id, token, maxAge };
 };
@@ -3489,7 +1552,7 @@ const authenticateBearerToken = async (c: AppContext, touch: boolean): Promise<A
     return sessionAuth;
   }
 
-  const row = await c.env.DB.prepare(
+  const row = await c.env.storage.db.prepare(
     `SELECT id, name, token_value, scopes_json, last_used_at, expires_at, is_revoked, created_at, workspace_id
      FROM api_tokens
      WHERE token_hash = ?
@@ -3503,8 +1566,18 @@ const authenticateBearerToken = async (c: AppContext, touch: boolean): Promise<A
     return null;
   }
 
-  if (touch) {
-    await c.env.DB.prepare(`UPDATE api_tokens SET last_used_at = ? WHERE id = ?`).bind(isoNow(), row.id).run();
+  const lastUsedAt = row.last_used_at ? Date.parse(row.last_used_at) : Number.NaN;
+  if (
+    touch
+    && (!Number.isFinite(lastUsedAt) || lastUsedAt <= Date.now() - API_TOKEN_LAST_USED_UPDATE_INTERVAL_MS)
+  ) {
+    const now = isoNow();
+    const cutoff = new Date(Date.now() - API_TOKEN_LAST_USED_UPDATE_INTERVAL_MS).toISOString();
+    await c.env.storage.db.prepare(
+      `UPDATE api_tokens
+       SET last_used_at = ?
+       WHERE id = ? AND (last_used_at IS NULL OR last_used_at <= ?)`,
+    ).bind(now, row.id, cutoff).run();
   }
 
   return {
@@ -3521,27 +1594,41 @@ const authenticateBearerToken = async (c: AppContext, touch: boolean): Promise<A
 };
 
 const authenticateSessionToken = async (c: AppContext, token: string, touch: boolean): Promise<AuthContext | null> => {
-  const row = await c.env.DB.prepare(
-    `SELECT s.id, s.user_id, u.username, u.display_name, s.expires_at
+  const now = isoNow();
+  const row = await c.env.storage.db.prepare(
+    `SELECT s.id, s.user_id, u.username, u.display_name, s.expires_at, s.last_seen_at,
+            wm.workspace_id, wm.role
      FROM sessions s
      INNER JOIN users u ON u.id = s.user_id
+     LEFT JOIN workspace_members wm ON wm.user_id = s.user_id
      WHERE s.token_hash = ?
        AND s.revoked_at IS NULL
        AND s.expires_at > ?
        AND u.is_disabled = 0`
   )
-    .bind(await sha256(token), isoNow())
+    .bind(await sha256(token), now)
     .first<SessionRow>();
 
   if (!row) {
     return null;
   }
 
-  if (touch) {
-    await c.env.DB.prepare(`UPDATE sessions SET last_seen_at = ? WHERE id = ?`).bind(isoNow(), row.id).run();
+  const lastSeenAt = row.last_seen_at ? Date.parse(row.last_seen_at) : Number.NaN;
+  if (
+    touch
+    && (!Number.isFinite(lastSeenAt) || lastSeenAt <= Date.now() - SESSION_LAST_SEEN_UPDATE_INTERVAL_MS)
+  ) {
+    const cutoff = new Date(Date.now() - SESSION_LAST_SEEN_UPDATE_INTERVAL_MS).toISOString();
+    await c.env.storage.db.prepare(
+      `UPDATE sessions
+       SET last_seen_at = ?
+       WHERE id = ? AND (last_seen_at IS NULL OR last_seen_at <= ?)`,
+    ).bind(now, row.id, cutoff).run();
   }
 
-  const workspace = await ensureUserWorkspace(c.env.DB, row.user_id, row.username);
+  const workspace = row.workspace_id && row.role
+    ? { workspaceId: row.workspace_id, role: row.role }
+    : await ensureUserWorkspace(c.env.storage.db, row.user_id, row.username, c.req.header("accept-language"));
 
   return {
     kind: "user",
@@ -3577,225 +1664,10 @@ const getBearerToken = (c: AppContext) => {
   return scheme.toLowerCase() === "bearer" && token ? token : null;
 };
 
-const getAuditActor = (c: AppContext) => {
-  const auth = c.get("auth");
-
-  return {
-    actorType: auth?.actorType ?? "user",
-    actorId: auth?.actorId ?? null,
-  };
-};
-
-const getActorLabel = (c: AppContext) => {
-  const auth = c.get("auth");
-  return auth?.actorId ? `${auth.actorType}:${auth.actorId}` : auth?.username ?? "user";
-};
-
-const getWorkspaceId = (c: AppContext) => c.get("auth").workspaceId;
-
-const requireOwner = (c: AppContext) => {
-  const auth = c.get("auth");
-  return auth?.kind === "user" && auth.role === "owner"
-    ? null
-    : forbidden(c, "Only the instance owner can manage users.");
-};
-
-const requireUser = (c: AppContext) => {
-  const auth = c.get("auth");
-
-  if (auth?.kind === "user") {
-    return null;
-  }
-
-  return forbidden(c, "Only an interactive user session can manage this resource.");
-};
-
-const requireScopes = (c: AppContext, ...scopes: TokenScope[]) => {
-  const auth = c.get("auth");
-
-  if (!auth) {
-    return unauthorized(c, "Authentication required.");
-  }
-
-  if (hasScopes(auth, scopes)) {
-    return null;
-  }
-
-  return forbidden(c, `Missing required scope: ${scopes.join(", ")}`);
-};
-
-const assertScope = (auth: AuthContext, scope: TokenScope) => {
-  if (!hasScopes(auth, [scope])) {
-    throw new AppError("forbidden", `Missing required scope: ${scope}`, 403);
-  }
-};
-
-const hasScopes = (auth: AuthContext, scopes: TokenScope[]) => {
-  if (auth.kind === "user") {
-    return true;
-  }
-
-  return scopes.every((scope) => auth.scopes.includes(scope));
-};
-
-const normalizeTokenScopes = (scopes: string[]) => {
-  const normalized = Array.from(new Set(scopes.map((scope) => scope.trim()).filter(Boolean)));
-
-  if (normalized.some((scope) => !isTokenScope(scope))) {
-    return null;
-  }
-
-  return normalized as TokenScope[];
-};
-
-const isTokenScope = (scope: string): scope is TokenScope =>
-  (ALL_TOKEN_SCOPES as readonly string[]).includes(scope);
-
 const getSessionMaxAge = (env: Bindings) => {
   const days = clampNumber(Number(env.EDGE_EVER_SESSION_TTL_DAYS ?? DEFAULT_SESSION_TTL_DAYS), 1, MAX_SESSION_TTL_DAYS);
   return days * 24 * 60 * 60;
 };
-
-const hashPassword = async (password: string) => {
-  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES));
-  const hash = await derivePasswordHash(password, salt, PASSWORD_HASH_ITERATIONS);
-
-  return [
-    PASSWORD_HASH_ALGORITHM,
-    PASSWORD_HASH_ITERATIONS,
-    base64UrlEncode(salt),
-    base64UrlEncode(hash),
-  ].join("$");
-};
-
-const verifyPassword = async (password: string, passwordHash: string) => {
-  const [algorithm, iterationsRaw, saltRaw, hashRaw] = passwordHash.split("$");
-  const iterations = Number(iterationsRaw);
-
-  if (
-    algorithm !== PASSWORD_HASH_ALGORITHM ||
-    !Number.isInteger(iterations) ||
-    iterations < 100_000 ||
-    !saltRaw ||
-    !hashRaw
-  ) {
-    return false;
-  }
-
-  try {
-    const expected = base64UrlDecode(hashRaw);
-    const salt = base64UrlDecode(saltRaw);
-    const actual = await derivePasswordHash(password, salt, iterations);
-
-    return timingSafeEqual(actual, expected);
-  } catch {
-    return false;
-  }
-};
-
-const derivePasswordHash = async (password: string, salt: Uint8Array, iterations: number) => {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, [
-    "deriveBits",
-  ]);
-  const saltBuffer = salt.buffer.slice(salt.byteOffset, salt.byteOffset + salt.byteLength) as ArrayBuffer;
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: saltBuffer,
-      iterations,
-    },
-    key,
-    PASSWORD_HASH_BYTES * 8
-  );
-
-  return new Uint8Array(bits);
-};
-
-const randomToken = (bytes: number) => {
-  const token = crypto.getRandomValues(new Uint8Array(bytes));
-  return base64UrlEncode(token);
-};
-
-const base64UrlEncode = (bytes: Uint8Array) => {
-  let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-};
-
-const base64UrlDecode = (value: string) => {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-
-  return bytes;
-};
-
-const timingSafeEqual = (left: Uint8Array, right: Uint8Array) => {
-  const length = Math.max(left.length, right.length);
-  let diff = left.length ^ right.length;
-
-  for (let index = 0; index < length; index += 1) {
-    diff |= (left[index % left.length] ?? 0) ^ (right[index % right.length] ?? 0);
-  }
-
-  return diff === 0;
-};
-
-const mapNotebook = (row: NotebookRow): Notebook => ({
-  id: row.id,
-  parentId: row.parent_id,
-  name: row.name,
-  slug: row.slug,
-  icon: row.icon,
-  color: row.color,
-  sortOrder: row.sort_order,
-  memoCount: row.memo_count ?? 0,
-  lastMemoUpdatedAt: row.last_memo_updated_at,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-});
-
-const notebookSelectSql = (tail: string) => `
-  SELECT n.id,
-         n.parent_id,
-         n.name,
-         n.slug,
-         n.icon,
-         n.color,
-         n.sort_order,
-         COUNT(m.id) AS memo_count,
-         MAX(m.updated_at) AS last_memo_updated_at,
-         n.created_at,
-         n.updated_at
-  FROM notebooks n
-  LEFT JOIN memos m ON m.notebook_id = n.id AND m.is_deleted = 0
-  ${tail}
-`;
-
-const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => ({
-  id: row.id,
-  notebookId: row.notebook_id,
-  title: row.title,
-  excerpt: row.excerpt || createExcerpt(row.content_text ?? ""),
-  tags: parseJsonArray(row.tags_json),
-  isPinned: Boolean(row.is_pinned),
-  isArchived: Boolean(row.is_archived),
-  isDeleted: Boolean(row.is_deleted),
-  revision: row.revision,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  deletedAt: row.deleted_at,
-});
 
 const mapMemoDetail = (row: MemoDetailRow): MemoDetail => ({
   ...mapMemoSummary(row),
@@ -3814,20 +1686,6 @@ const mapMemoRevision = (row: MemoRevisionRow): MemoRevision => ({
   revision: row.revision,
   title: row.title,
   tags: parseJsonArray(row.tags_json),
-  contentMarkdown: row.content_markdown,
-  contentText: row.content_text,
-  contentHash: row.content_hash,
-  createdBy: row.created_by,
-  createdAt: row.created_at,
-});
-
-const mapJsonBackupRevision = (row: BackupRevisionRow): JsonBackupRevision => ({
-  id: row.id,
-  memoId: row.memo_id,
-  revision: row.revision,
-  title: row.title,
-  tags: parseJsonArray(row.tags_json),
-  contentJson: parseDoc(row.content_json),
   contentMarkdown: row.content_markdown,
   contentText: row.content_text,
   contentHash: row.content_hash,
@@ -3946,10 +1804,7 @@ const restoreJsonMemos = async (db: D1Database, workspaceId: string, backups: Js
         memo.createdAt,
         memo.updatedAt
       ),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(memo.id),
-      db.prepare(
-        `INSERT INTO memos_fts (memo_id, title, content_text, tags) VALUES (?, ?, ?, ?)`
-      ).bind(memo.id, title, contentText, tags.join(" ")),
+      upsertMemoSearchDocumentStatement(db, memo.id, title, contentText, tags.join(" ")),
       db.prepare(`DELETE FROM memo_revisions WHERE memo_id = ?`).bind(memo.id),
     ]);
 
@@ -4025,319 +1880,44 @@ const assertNotebookIdsInWorkspace = async (db: D1Database, workspaceId: string,
   }
 };
 
-const mapResource = (row: ResourceRow): Resource => ({
-  id: row.id,
-  memoId: row.memo_id,
-  originalMemoId: row.original_memo_id,
-  kind: row.kind,
-  mimeType: row.mime_type,
-  filename: row.filename,
-  byteSize: row.byte_size,
-  sha256: row.sha256,
-  width: row.width,
-  height: row.height,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  url: `/api/v1/resources/${row.id}/blob`,
-});
+const getCurrentWorkspaceIdentity = async (db: D1Database, auth: AuthContext) => {
+  const row = await db.prepare(
+    `SELECT w.id AS workspace_id, w.name AS workspace_name, w.is_personal,
+            u.id AS user_id, u.username, u.display_name, wm.role
+     FROM workspaces w
+     INNER JOIN workspace_members wm ON wm.workspace_id = w.id
+     INNER JOIN users u ON u.id = wm.user_id
+     WHERE w.id = ?
+     ORDER BY CASE WHEN u.id = ? THEN 0 ELSE 1 END, wm.created_at ASC
+     LIMIT 1`
+  ).bind(auth.workspaceId, auth.kind === "user" ? auth.actorId : null).first<WorkspaceIdentityRow>();
 
-const mapResourceListItem = (row: ResourceListRow): ResourceListItem => ({
-  ...mapResource(row),
-  memoTitle: row.memo_title,
-  memoExcerpt: row.memo_excerpt,
-  memoDeleted: Boolean(row.memo_is_deleted),
-});
-
-const mapResourceStorageSummary = (row: ResourceStatsRow | null): ResourceStorageSummary => ({
-  totalCount: row?.total_count ?? 0,
-  totalBytes: row?.total_bytes ?? 0,
-  imageCount: row?.image_count ?? 0,
-  attachmentCount: row?.attachment_count ?? 0,
-});
-
-const mapApiToken = (row: ApiTokenRow): ApiToken => ({
-  id: row.id,
-  name: row.name,
-  token: row.token_value,
-  scopes: parseJsonArray(row.scopes_json),
-  lastUsedAt: row.last_used_at,
-  expiresAt: row.expires_at,
-  isRevoked: Boolean(row.is_revoked),
-  createdAt: row.created_at,
-});
-
-const mapTagSummary = (row: TagSummaryRow): TagSummary => ({
-  name: row.name,
-  memoCount: row.memo_count,
-  updatedAt: row.updated_at,
-});
-
-const getApiTokenRow = async (db: D1Database, id: string, workspaceId: string): Promise<ApiTokenRow | null> =>
-  db
-    .prepare(
-      `SELECT id, name, token_value, scopes_json, last_used_at, expires_at, is_revoked, created_at, workspace_id
-       FROM api_tokens
-       WHERE id = ? AND workspace_id = ?`
-    )
-    .bind(id, workspaceId)
-    .first<ApiTokenRow>();
-
-const listNotebooks = async (db: D1Database, workspaceId: string): Promise<Notebook[]> => {
-  const rows = await db
-    .prepare(
-      notebookSelectSql(
-        `WHERE n.workspace_id = ? AND n.is_deleted = 0
-         GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at
-         ORDER BY n.parent_id IS NOT NULL, n.sort_order ASC, n.name ASC`
-      )
-    )
-    .bind(workspaceId).all<NotebookRow>();
-
-  return rows.results.map(mapNotebook);
-};
-
-const listTagSummaries = async (db: D1Database, workspaceId: string): Promise<TagSummary[]> => {
-  const rows = await db
-    .prepare(
-      `SELECT json_each.value AS name,
-              COUNT(DISTINCT m.id) AS memo_count,
-              MAX(m.updated_at) AS updated_at
-       FROM memos m, json_each(m.tags_json)
-       WHERE m.workspace_id = ? AND m.is_deleted = 0
-         AND trim(json_each.value) <> ''
-       GROUP BY json_each.value
-       ORDER BY lower(json_each.value) ASC`
-    )
-    .bind(workspaceId).all<TagSummaryRow>();
-
-  return rows.results
-    .filter((row) => typeof row.name === "string" && row.name.trim())
-    .map(mapTagSummary);
-};
-
-const updateTagAcrossMemos = async (
-  db: D1Database,
-  workspaceId: string,
-  oldTag: string,
-  nextTag: string | null,
-  actor: { actorType: "user" | "agent"; actorId: string | null },
-  actorLabel: string
-) => {
-  const normalizedOld = normalizeTags([oldTag])[0];
-  const normalizedNext = nextTag === null ? null : normalizeTags([nextTag])[0];
-
-  if (!normalizedOld || normalizedOld === normalizedNext) {
-    return 0;
+  if (!row) {
+    throw new AppError("workspace_identity_not_found", "The authenticated workspace has no associated user.", 404);
   }
 
-  const rows = await db
-    .prepare(
-      `SELECT m.id, m.title, m.tags_json, c.content_text
-       FROM memos m
-       INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0
-         AND EXISTS (
-           SELECT 1
-           FROM json_each(m.tags_json)
-           WHERE json_each.value = ?
-         )`
-    )
-    .bind(workspaceId, normalizedOld)
-    .all<MemoTagUpdateRow>();
-
-  const now = isoNow();
-  const statements: D1PreparedStatement[] = [];
-  let updated = 0;
-
-  for (const row of rows.results) {
-    const currentTags = parseJsonArray(row.tags_json);
-
-    if (!currentTags.includes(normalizedOld)) {
-      continue;
-    }
-
-    const nextTags = normalizeTags(
-      currentTags.flatMap((tag) => {
-        if (tag !== normalizedOld) {
-          return [tag];
-        }
-
-        return normalizedNext ? [normalizedNext] : [];
-      })
-    );
-
-    statements.push(
-      db
-        .prepare(
-          `UPDATE memos
-           SET tags_json = ?, updated_by = ?, updated_at = ?
-           WHERE id = ? AND workspace_id = ? AND is_deleted = 0`
-        )
-        .bind(JSON.stringify(nextTags), actorLabel, now, row.id, workspaceId),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(row.id),
-      db
-        .prepare(
-          `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-           VALUES (?, ?, ?, ?)`
-        )
-        .bind(row.id, row.title, row.content_text, nextTags.join(" ")),
-      auditStatement(db, actor.actorType, actor.actorId, normalizedNext ? "tag.rename" : "tag.delete", "memo", row.id, {
-        from: normalizedOld,
-        to: normalizedNext,
-      })
-    );
-    updated += 1;
-  }
-
-  if (statements.length > 0) {
-    await db.batch(statements);
-  }
-
-  return updated;
-};
-
-const previewTagRename = async (db: D1Database, workspaceId: string, oldTag: string, nextTag: string | null) => {
-  const normalizedOld = normalizeTags([oldTag])[0];
-  const normalizedNext = nextTag === null ? null : normalizeTags([nextTag])[0];
-
-  if (!normalizedOld || normalizedOld === normalizedNext) {
-    return { dryRun: true, updated: 0, changes: [] };
-  }
-
-  const rows = await getMemoRowsByTag(db, workspaceId, normalizedOld);
-  const changes = rows.map((row) => {
-    const currentTags = parseJsonArray(row.tags_json);
-    const nextTags = normalizeTags(
-      currentTags.flatMap((tag) => {
-        if (tag !== normalizedOld) {
-          return [tag];
-        }
-
-        return normalizedNext ? [normalizedNext] : [];
-      })
-    );
-
-    return {
-      memoId: row.id,
-      title: row.title,
-      currentTags,
-      nextTags,
-    };
-  });
-
-  return { dryRun: true, updated: changes.length, changes };
-};
-
-const getMemoRowsByTag = async (db: D1Database, workspaceId: string, tag: string) => {
-  const rows = await db
-    .prepare(
-      `SELECT m.id, m.title, m.tags_json, c.content_text
-       FROM memos m
-       INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0
-         AND EXISTS (
-           SELECT 1
-           FROM json_each(m.tags_json)
-           WHERE json_each.value = ?
-         )`
-    )
-    .bind(workspaceId, tag)
-    .all<MemoTagUpdateRow>();
-
-  return rows.results;
-};
-
-const updateTagsForMemos = async (
-  db: D1Database,
-  input: {
-    workspaceId: string;
-    memoIds: string[];
-    tags: string[];
-    mode: "add" | "remove";
-    dryRun: boolean;
-    actor: { actorType: "user" | "agent"; actorId: string | null };
-    actorLabel: string;
-  }
-) => {
-  const memoIds = Array.from(new Set(input.memoIds));
-  const tags = normalizeTags(input.tags);
-
-  if (memoIds.length === 0 || tags.length === 0) {
-    throw new AppError("invalid_params", "memoIds and tags must include at least one item", 400);
-  }
-
-  const placeholders = memoIds.map(() => "?").join(", ");
-  const rows = await db
-    .prepare(
-      `SELECT m.id, m.title, m.tags_json, c.content_text
-       FROM memos m
-       INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0 AND m.id IN (${placeholders})`
-    )
-    .bind(input.workspaceId, ...memoIds)
-    .all<MemoTagUpdateRow>();
-
-  if (rows.results.length !== memoIds.length) {
-    throw new AppError("missing_memos", "One or more memos cannot be updated.", 400);
-  }
-
-  const changes = rows.results
-    .map((row) => {
-      const currentTags = parseJsonArray(row.tags_json);
-      const nextTags =
-        input.mode === "add"
-          ? normalizeTags([...currentTags, ...tags])
-          : currentTags.filter((tag) => !tags.includes(tag));
-
-      return {
-        memoId: row.id,
-        title: row.title,
-        currentTags,
-        nextTags,
-        contentText: row.content_text,
-      };
-    })
-    .filter((change) => JSON.stringify(change.currentTags) !== JSON.stringify(change.nextTags));
-
-  if (input.dryRun) {
-    return {
-      dryRun: true,
-      updated: changes.length,
-      changes: changes.map(({ contentText: _contentText, ...change }) => change),
-    };
-  }
-
-  if (changes.length === 0) {
-    return { ok: true, updated: 0 };
-  }
-
-  const now = isoNow();
-  const statements: D1PreparedStatement[] = [];
-
-  for (const change of changes) {
-    statements.push(
-      db
-        .prepare(
-          `UPDATE memos
-           SET tags_json = ?, updated_by = ?, updated_at = ?
-           WHERE id = ? AND workspace_id = ? AND is_deleted = 0`
-        )
-        .bind(JSON.stringify(change.nextTags), input.actorLabel, now, change.memoId, input.workspaceId),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(change.memoId),
-      db
-        .prepare(
-          `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-           VALUES (?, ?, ?, ?)`
-        )
-        .bind(change.memoId, change.title, change.contentText, change.nextTags.join(" ")),
-      auditStatement(db, input.actor.actorType, input.actor.actorId, input.mode === "add" ? "tag.add" : "tag.remove", "memo", change.memoId, {
-        tags,
-      })
-    );
-  }
-
-  await db.batch(statements);
-  return { ok: true, updated: changes.length };
+  return {
+    user: {
+      id: row.user_id,
+      username: row.username,
+      displayName: row.display_name,
+      role: row.role,
+    },
+    workspace: {
+      id: row.workspace_id,
+      name: row.workspace_name,
+      isPersonal: row.is_personal === 1,
+    },
+    authorization: {
+      kind: auth.kind === "agent" ? "api_token" : "user_session",
+      ...(auth.kind === "agent" ? { tokenName: auth.username, scopes: auth.scopes } : {}),
+    },
+    dataIsolation: {
+      workspaceScoped: true,
+      statement:
+        "Every notebook and memo returned by this MCP server belongs to this workspace; data from other users is excluded.",
+    },
+  };
 };
 
 const searchMemoSummaries = async (
@@ -4369,8 +1949,8 @@ const searchMemoSummaries = async (
   }
 
   for (const tag of tags) {
-    filters.push("EXISTS (SELECT 1 FROM json_each(m.tags_json) WHERE json_each.value = ?)");
-    binds.push(tag);
+    filters.push("EXISTS (SELECT 1 FROM memo_tags mt WHERE mt.memo_id = m.id AND mt.workspace_id = ? AND mt.name = ?)");
+    binds.push(options.workspaceId, tag);
   }
 
   if (options.createdAfter) {
@@ -4528,139 +2108,6 @@ const listMemosForMcp = async (
   };
 };
 
-const getNotebook = async (db: D1Database, workspaceId: string, id: string): Promise<Notebook | null> => {
-  const row = await db
-    .prepare(
-      notebookSelectSql(
-        `WHERE n.id = ? AND n.workspace_id = ? AND n.is_deleted = 0
-         GROUP BY n.id, n.parent_id, n.name, n.slug, n.icon, n.color, n.sort_order, n.created_at, n.updated_at`
-      )
-    )
-    .bind(id, workspaceId)
-    .first<NotebookRow>();
-
-  return row ? mapNotebook(row) : null;
-};
-
-const createNotebookRecord = async (
-  db: D1Database,
-  workspaceId: string,
-  input: NotebookCreateInput & { sortOrder?: number },
-  actor: { actorType: "user" | "agent"; actorId: string | null }
-) => {
-  const parentId = input.parentId ?? null;
-
-  if (parentId && !(await getNotebook(db, workspaceId, parentId))) {
-    throw new AppError("not_found", "Parent notebook not found", 404);
-  }
-
-  const id = createId("nb");
-  const now = isoNow();
-  const sortOrder = input.sortOrder ?? Date.now();
-
-  await db.batch([
-    db
-      .prepare(
-        `INSERT INTO notebooks (id, workspace_id, parent_id, name, slug, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .bind(id, workspaceId, parentId, input.name, slugify(input.name), sortOrder, now, now),
-    auditStatement(db, actor.actorType, actor.actorId, "notebook.create", "notebook", id, {
-      name: input.name,
-      parentId,
-      sortOrder,
-    }),
-  ]);
-
-  const notebook = await getNotebook(db, workspaceId, id);
-
-  if (!notebook) {
-    throw new AppError("not_found", "Notebook not found after create", 404);
-  }
-
-  return notebook;
-};
-
-const updateNotebookRecord = async (
-  db: D1Database,
-  workspaceId: string,
-  id: string,
-  input: { name?: string; parentId?: string | null; sortOrder?: number },
-  actor: { actorType: "user" | "agent"; actorId: string | null }
-) => {
-  const current = await getNotebook(db, workspaceId, id);
-
-  if (!current) {
-    throw new AppError("not_found", "Notebook not found", 404);
-  }
-
-  const nextName = input.name ?? current.name;
-  const nextParentId = input.parentId === undefined ? current.parentId : input.parentId;
-  const nextSortOrder = input.sortOrder ?? current.sortOrder;
-  const now = isoNow();
-
-  if (nextParentId === id) {
-    throw new AppError("bad_request", "Notebook cannot be its own parent", 400);
-  }
-
-  if (nextParentId) {
-    const parent = await getNotebook(db, workspaceId, nextParentId);
-
-    if (!parent) {
-      throw new AppError("not_found", "Parent notebook not found", 404);
-    }
-
-    if (await isNotebookDescendant(db, workspaceId, nextParentId, id)) {
-      throw new AppError("notebook_cycle", "Notebook cannot be moved into its own descendant.", 409);
-    }
-  }
-
-  await db.batch([
-    db
-      .prepare(
-        `UPDATE notebooks
-         SET name = ?, slug = ?, parent_id = ?, sort_order = ?, updated_at = ?
-         WHERE id = ? AND workspace_id = ? AND is_deleted = 0`
-      )
-      .bind(nextName, slugify(nextName), nextParentId ?? null, nextSortOrder, now, id, workspaceId),
-    auditStatement(db, actor.actorType, actor.actorId, "notebook.update", "notebook", id, input),
-  ]);
-
-  const notebook = await getNotebook(db, workspaceId, id);
-
-  if (!notebook) {
-    throw new AppError("not_found", "Notebook not found after update", 404);
-  }
-
-  return notebook;
-};
-
-const isNotebookDescendant = async (db: D1Database, workspaceId: string, candidateId: string, ancestorId: string) => {
-  const row = await db
-    .prepare(
-      `WITH RECURSIVE descendants(id) AS (
-         SELECT id
-         FROM notebooks
-         WHERE workspace_id = ? AND parent_id = ? AND is_deleted = 0
-
-         UNION ALL
-
-         SELECT n.id
-         FROM notebooks n
-         INNER JOIN descendants d ON n.parent_id = d.id
-         WHERE n.workspace_id = ? AND n.is_deleted = 0
-       )
-       SELECT id
-       FROM descendants
-       WHERE id = ?
-       LIMIT 1`
-    )
-    .bind(workspaceId, ancestorId, workspaceId, candidateId)
-    .first<{ id: string }>();
-
-  return Boolean(row);
-};
-
 const getMemoDetailRow = async (
   db: D1Database,
   workspaceId: string,
@@ -4685,14 +2132,83 @@ const getMemoDetail = async (db: D1Database, workspaceId: string, id: string, in
   return row ? mapMemoDetail(row) : null;
 };
 
+export const createMemoEditSession = async (c: AppContext, memoId: string): Promise<MemoEditSession | null> => {
+  const current = await getMemoDetailRow(c.env.storage.db, getWorkspaceId(c), memoId);
+  if (!current) return null;
+
+  const actor = getAuditActor(c);
+  const now = isoNow();
+  const existing = await c.env.storage.db.prepare(
+    `SELECT id, memo_id, base_revision, base_content_hash, expires_at
+     FROM memo_edit_sessions
+     WHERE memo_id = ? AND actor_type = ? AND actor_id IS ?
+       AND base_revision = ? AND base_content_hash = ? AND expires_at > ?
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+  ).bind(
+    memoId,
+    actor.actorType,
+    actor.actorId,
+    current.revision,
+    current.content_hash,
+    now,
+  ).first<{
+    id: string;
+    memo_id: string;
+    base_revision: number;
+    base_content_hash: string;
+    expires_at: string;
+  }>();
+
+  if (existing) {
+    return {
+      id: existing.id,
+      memoId: existing.memo_id,
+      baseRevision: existing.base_revision,
+      baseContentHash: existing.base_content_hash,
+      expiresAt: existing.expires_at,
+    };
+  }
+
+  const session: MemoEditSession = {
+    id: createId("edit"),
+    memoId,
+    baseRevision: current.revision,
+    baseContentHash: current.content_hash,
+    expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString(),
+  };
+
+  await c.env.storage.db.batch([
+    c.env.storage.db.prepare(`DELETE FROM memo_edit_sessions WHERE expires_at <= ?`).bind(now),
+    c.env.storage.db.prepare(
+      `INSERT INTO memo_edit_sessions (
+         id, memo_id, actor_type, actor_id, base_revision, base_content_hash,
+         expires_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      session.id,
+      memoId,
+      actor.actorType,
+      actor.actorId,
+      session.baseRevision,
+      session.baseContentHash,
+      session.expiresAt,
+      now,
+      now,
+    ),
+  ]);
+
+  return session;
+};
+
 const deleteMemosRecord = async (
-  db: D1Database,
-  resourcesBucket: R2Bucket,
+  env: Bindings,
   workspaceId: string,
   memoIds: string[],
   permanent: boolean,
   actor: { actorType: "user" | "agent"; actorId: string | null }
 ) => {
+  const db = env.storage.db;
   const uniqueMemoIds = Array.from(new Set(memoIds));
 
   if (uniqueMemoIds.length === 0) {
@@ -4724,20 +2240,18 @@ const deleteMemosRecord = async (
   if (permanent) {
     const resourceRows = await db
       .prepare(
-        `SELECT object_key
+        `SELECT object_key, storage_config_id
          FROM resources
          WHERE memo_id IN (${placeholders})`
       )
       .bind(...uniqueMemoIds)
-      .all<{ object_key: string }>();
-    const objectKeys = resourceRows.results.map((resource) => resource.object_key);
+      .all<{ object_key: string; storage_config_id: string }>();
 
-    if (objectKeys.length > 0) {
-      await resourcesBucket.delete(objectKeys);
+    if (resourceRows.results.length > 0) {
+      await deleteStoredObjects(env, resourceRows.results);
     }
 
     statements.push(
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
       db.prepare(`DELETE FROM resources WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
       db.prepare(`DELETE FROM memo_revisions WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
       db.prepare(`DELETE FROM memo_contents WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
@@ -4749,6 +2263,7 @@ const deleteMemosRecord = async (
     }
   } else {
     statements.push(
+      db.prepare(`DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id IN (${placeholders})`).bind(workspaceId, ...uniqueMemoIds),
       db
         .prepare(
           `UPDATE memos
@@ -4763,7 +2278,7 @@ const deleteMemosRecord = async (
            WHERE is_deleted = 0 AND memo_id IN (${placeholders})`
         )
         .bind(now, now, ...uniqueMemoIds),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds)
+      deleteMemoSearchDocumentsStatement(db, uniqueMemoIds)
     );
 
     for (const memoId of uniqueMemoIds) {
@@ -4773,6 +2288,25 @@ const deleteMemosRecord = async (
 
   await db.batch(statements);
   return uniqueMemoIds.length;
+};
+
+const deleteMemoRecord = async (
+  env: Bindings,
+  workspaceId: string,
+  memoId: string,
+  permanent: boolean,
+  actor: AuditActor,
+) => {
+  const current = await getMemoDetailRow(env.storage.db, workspaceId, memoId, permanent);
+
+  if (permanent && (!current || current.is_deleted === 0)) {
+    throw new AppError("not_found", "Memo not found in trash", 404);
+  }
+
+  // Soft deletion historically treats an unknown/already-deleted memo as an idempotent no-op.
+  if (!permanent && !current) return;
+
+  await deleteMemosRecord(env, workspaceId, [memoId], permanent, actor);
 };
 
 const getMemosForBulkAction = async (db: D1Database, workspaceId: string, memoIds: string[], deletedState: 0 | 1) => {
@@ -4870,13 +2404,7 @@ const restoreMemosRecord = async (
            WHERE memo_id = ? AND is_deleted = 1`
         )
         .bind(now, row.id),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(row.id),
-      db
-        .prepare(
-          `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-           VALUES (?, ?, ?, ?)`
-        )
-        .bind(row.id, row.title, row.content_text, tags.join(" ")),
+      upsertMemoSearchDocumentStatement(db, row.id, row.title, row.content_text, tags.join(" ")),
       auditStatement(db, actor.actorType, actor.actorId, "memo.restore", "memo", row.id, {
         fromNotebookId: row.notebook_id,
         toNotebookId: restoreNotebookId,
@@ -4888,12 +2416,29 @@ const restoreMemosRecord = async (
   return uniqueMemoIds.length;
 };
 
-const emptyTrashMemosRecord = async (
+const restoreMemoRecord = async (
   db: D1Database,
-  resourcesBucket: R2Bucket,
+  workspaceId: string,
+  memoId: string,
+  actor: AuditActor,
+): Promise<MemoDetail> => {
+  const current = await getMemoDetailRow(db, workspaceId, memoId, true);
+  if (!current || current.is_deleted === 0) {
+    throw new AppError("not_found", "Memo not found in trash", 404);
+  }
+
+  await restoreMemosRecord(db, workspaceId, [memoId], actor);
+  const memo = await getMemoDetail(db, workspaceId, memoId);
+  if (!memo) throw new AppError("not_found", "Memo not found after restore", 404);
+  return memo;
+};
+
+const emptyTrashMemosRecord = async (
+  env: Bindings,
   workspaceId: string,
   actor: { actorType: "user" | "agent"; actorId: string | null }
 ) => {
+  const db = env.storage.db;
   const countRow = await db
     .prepare(
       `SELECT COUNT(*) AS count
@@ -4909,20 +2454,18 @@ const emptyTrashMemosRecord = async (
 
   const resourceRows = await db
     .prepare(
-      `SELECT r.object_key
+      `SELECT r.object_key, r.storage_config_id
        FROM resources r
        INNER JOIN memos m ON m.id = r.memo_id
        WHERE m.workspace_id = ? AND m.is_deleted = 1`
     )
-    .bind(workspaceId).all<{ object_key: string }>();
-  const objectKeys = resourceRows.results.map((resource) => resource.object_key);
+    .bind(workspaceId).all<{ object_key: string; storage_config_id: string }>();
 
-  if (objectKeys.length > 0) {
-    await resourcesBucket.delete(objectKeys);
+  if (resourceRows.results.length > 0) {
+    await deleteStoredObjects(env, resourceRows.results);
   }
 
   await db.batch([
-    db.prepare(`DELETE FROM memos_fts WHERE memo_id IN (SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = 1)`).bind(workspaceId),
     db.prepare(`UPDATE resources SET original_memo_id = NULL WHERE original_memo_id IN (SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = 1)`).bind(workspaceId),
     db.prepare(`DELETE FROM resources WHERE memo_id IN (SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = 1)`).bind(workspaceId),
     db.prepare(`DELETE FROM memo_revisions WHERE memo_id IN (SELECT id FROM memos WHERE workspace_id = ? AND is_deleted = 1)`).bind(workspaceId),
@@ -4942,18 +2485,20 @@ let localDemoSeedPromise: Promise<void> | null = null;
 
 const ensureLocalDemoSeed = (env: Bindings) => {
   localDemoSeedPromise ??= (async () => {
-    const existingMarker = await env.DB.prepare(
-      `SELECT id FROM audit_events WHERE action = 'demo.local_seed' LIMIT 1`
-    ).first<{ id: string }>();
+    const memoPlaceholders = DEMO_SEED_MEMO_IDS.map(() => "?").join(", ");
+    await env.storage.db.batch([
+      env.storage.db.prepare(`DELETE FROM mobile_sync_changes`),
+      env.storage.db.prepare(`DELETE FROM memo_search_documents`),
+      env.storage.db.prepare(`DELETE FROM resources`),
+      env.storage.db.prepare(`DELETE FROM memo_revisions`),
+      env.storage.db.prepare(`DELETE FROM memo_contents WHERE memo_id NOT IN (${memoPlaceholders})`).bind(...DEMO_SEED_MEMO_IDS),
+      env.storage.db.prepare(`DELETE FROM memos WHERE id NOT IN (${memoPlaceholders})`).bind(...DEMO_SEED_MEMO_IDS),
+    ]);
 
-    if (existingMarker) {
-      return;
-    }
-
-    await ensureDemoSeed(env);
-    await audit(env.DB, "system", null, "demo.local_seed", "demo", "edgeever-local", {
+    await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
+    await audit(env.storage.db, "system", null, "demo.local_seed", "demo", "edgeever-local", {
       seedMemoCount: DEMO_SEED_MEMOS.length,
-      mode: "non-destructive",
+      mode: "sync-seed",
     });
   })().catch((error) => {
     localDemoSeedPromise = null;
@@ -4967,7 +2512,7 @@ const ensureDemoSeed = async (
   env: Bindings,
   options: { overwriteExisting?: boolean; refreshResources?: boolean } = {},
 ) => {
-  const db = env.DB;
+  const db = env.storage.db;
   const now = isoNow();
   const statements: D1PreparedStatement[] = [];
   const bucketName = env.EDGE_EVER_R2_BUCKET_NAME?.trim() || DEFAULT_R2_BUCKET_NAME;
@@ -5030,11 +2575,25 @@ const ensureDemoSeed = async (
   }
 
   for (const memo of DEMO_SEED_MEMOS) {
-    if (!shouldUpsertDemoSeedRecord(existingMemoIds, memo.id, overwriteExisting)) {
+    const isOverviewSeedMemo = memo.id === "memo_demo_overview" || memo.id === "memo_demo_overview_en";
+    if (!overwriteExisting && !isOverviewSeedMemo && existingMemoIds.has(memo.id)) {
       continue;
     }
 
     const contentJson = markdownToDoc(memo.markdown);
+    const applyDemoImageWidths = (nodes: any[]) => {
+      for (const node of nodes) {
+        if (node.type === "image") {
+          node.attrs = { ...node.attrs, width: 35 };
+        }
+        if (Array.isArray(node.content)) {
+          applyDemoImageWidths(node.content);
+        }
+      }
+    };
+    if (Array.isArray(contentJson.content)) {
+      applyDemoImageWidths(contentJson.content);
+    }
     const contentText = docToText(contentJson);
     const contentHash = await sha256(memo.markdown + JSON.stringify(contentJson));
 
@@ -5071,23 +2630,58 @@ const ensureDemoSeed = async (
         .prepare(
           `INSERT INTO memo_contents (
             memo_id, content_json, content_markdown, content_text, content_hash, revision, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(memo_id) DO UPDATE SET
             content_json = excluded.content_json,
             content_markdown = excluded.content_markdown,
             content_text = excluded.content_text,
             content_hash = excluded.content_hash,
-            revision = 0,
+            revision = excluded.revision,
             updated_at = excluded.updated_at`
         )
-        .bind(memo.id, JSON.stringify(contentJson), memo.markdown, contentText, contentHash, now, now),
-      db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(memo.id),
+        .bind(
+          memo.id,
+          JSON.stringify(contentJson),
+          memo.markdown,
+          contentText,
+          contentHash,
+          "revision" in memo ? memo.revision : 0,
+          now,
+          now,
+        ),
+      upsertMemoSearchDocumentStatement(db, memo.id, memo.title, contentText, memo.tags.join(" "))
+    );
+  }
+
+  for (const revision of DEMO_SEED_REVISIONS) {
+    const contentJson = markdownToDoc(revision.markdown);
+    const contentHash = await sha256(revision.markdown + JSON.stringify(contentJson));
+
+    statements.push(
       db
         .prepare(
-          `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-           VALUES (?, ?, ?, ?)`
+          `INSERT INTO memo_revisions (
+            id, memo_id, revision, title, content_json, content_markdown, content_hash,
+            created_by, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'system', ?)
+          ON CONFLICT(id) DO UPDATE SET
+            memo_id = excluded.memo_id,
+            revision = excluded.revision,
+            title = excluded.title,
+            content_json = excluded.content_json,
+            content_markdown = excluded.content_markdown,
+            content_hash = excluded.content_hash`
         )
-        .bind(memo.id, memo.title, contentText, memo.tags.join(" "))
+        .bind(
+          revision.id,
+          revision.memoId,
+          revision.revision,
+          revision.title,
+          JSON.stringify(contentJson),
+          revision.markdown,
+          contentHash,
+          now,
+        ),
     );
   }
 
@@ -5096,22 +2690,24 @@ const ensureDemoSeed = async (
     : new Set(
         (
           await db
-            .prepare(`SELECT id FROM resources WHERE id IN (${DEMO_SEED_RESOURCES.map(() => "?").join(", ")})`)
-            .bind(...DEMO_SEED_RESOURCES.map((resource) => resource.id))
+            .prepare(`SELECT id FROM resources WHERE id IN (${DEMO_SEED_ATTACHMENT_RESOURCES.map(() => "?").join(", ")})`)
+            .bind(...DEMO_SEED_ATTACHMENT_RESOURCES.map((resource) => resource.id))
             .all<{ id: string }>()
         ).results.map((resource) => resource.id)
       );
 
-  for (const resource of DEMO_SEED_RESOURCES) {
+  for (const resource of DEMO_SEED_ATTACHMENT_RESOURCES) {
     if (!shouldUpsertDemoSeedRecord(existingResourceIds, resource.id, overwriteExisting)) {
       continue;
     }
 
-    const bytes = new TextEncoder().encode(resource.svg);
-    const objectKey = `demo/${resource.memoId}/${resource.id}.svg`;
+    const isImageSeed = "svg" in resource;
+    const bytes = isImageSeed ? new TextEncoder().encode(resource.svg) : decodeDemoAttachment(resource);
+    const extension = isImageSeed ? "svg" : resource.filename.split(".").pop() || "bin";
+    const objectKey = `demo/${resource.memoId}/${resource.id}.${extension}`;
 
     if (options.refreshResources || !existingResourceIds.has(resource.id)) {
-      await env.RESOURCES.put(objectKey, bytes, {
+      await env.storage.resources.put(objectKey, bytes, {
         httpMetadata: {
           contentType: resource.mimeType,
           cacheControl: "private, max-age=3600",
@@ -5129,14 +2725,15 @@ const ensureDemoSeed = async (
       db
         .prepare(
           `INSERT INTO resources (
-            id, memo_id, bucket_name, object_key, kind, mime_type, filename,
+            id, memo_id, bucket_name, object_key, storage_config_id, kind, mime_type, filename,
             byte_size, sha256, width, height, metadata_json, is_deleted, created_at, updated_at, deleted_at
-          ) VALUES (?, ?, ?, ?, 'image', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
+          ) VALUES (?, ?, ?, ?, 'builtin', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)
           ON CONFLICT(id) DO UPDATE SET
             memo_id = excluded.memo_id,
             bucket_name = excluded.bucket_name,
             object_key = excluded.object_key,
-            kind = 'image',
+            storage_config_id = excluded.storage_config_id,
+            kind = excluded.kind,
             mime_type = excluded.mime_type,
             filename = excluded.filename,
             byte_size = excluded.byte_size,
@@ -5153,12 +2750,13 @@ const ensureDemoSeed = async (
           resource.memoId,
           bucketName,
           objectKey,
+          isImageSeed ? "image" : "attachment",
           resource.mimeType,
           resource.filename,
           bytes.byteLength,
           await sha256Bytes(bytes),
-          resource.width,
-          resource.height,
+          isImageSeed ? resource.width : null,
+          isImageSeed ? resource.height : null,
           JSON.stringify({ source: "demo-seed" }),
           now,
           now
@@ -5171,55 +2769,91 @@ const ensureDemoSeed = async (
   }
 };
 
-const resetDemoData = async (env: Bindings, scheduledTime: number) => {
-  const db = env.DB;
+export const acquireMaintenanceLease = async (
+  db: D1Database,
+  name: string,
+  leaseMs: number,
+) => {
+  const ownerId = createId("lease");
+  const acquiredAt = isoNow();
+  const expiresAt = new Date(Date.now() + leaseMs).toISOString();
+  const acquired = await db.prepare(
+    `INSERT INTO maintenance_leases (name, owner_id, acquired_at, expires_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(name) DO UPDATE SET
+       owner_id = excluded.owner_id,
+       acquired_at = excluded.acquired_at,
+       expires_at = excluded.expires_at
+     WHERE maintenance_leases.expires_at <= excluded.acquired_at
+     RETURNING owner_id`,
+  ).bind(name, ownerId, acquiredAt, expiresAt).first<{ owner_id: string }>();
+
+  return acquired?.owner_id === ownerId ? ownerId : null;
+};
+
+const resetDemoData = async (
+  env: Bindings,
+  scheduledTime: number,
+  options: { resetCredentials?: boolean } = {}
+) => {
+  const db = env.storage.db;
+  const leaseOwnerId = await acquireMaintenanceLease(db, "demo-reset", DEMO_RESET_LEASE_MS);
+  if (!leaseOwnerId) return false;
+
   const now = isoNow();
-  const demoUsername = env.EDGE_EVER_AUTH_USERNAME?.trim() || "admin";
-  const demoPasswordHash = await resolveDemoPasswordHash(
-    env.EDGE_EVER_AUTH_PASSWORD,
-    env.EDGE_EVER_AUTH_PASSWORD_HASH,
-    hashPassword,
-  );
-  const memoPlaceholders = DEMO_SEED_MEMO_IDS.map(() => "?").join(", ");
-  const notebookPlaceholders = DEMO_SEED_NOTEBOOK_IDS.map(() => "?").join(", ");
-  const resourceRows = await db.prepare(`SELECT object_key FROM resources`).all<{ object_key: string }>();
-  const objectKeys = resourceRows.results.map((resource) => resource.object_key);
-
-  for (let index = 0; index < objectKeys.length; index += 1000) {
-    await env.RESOURCES.delete(objectKeys.slice(index, index + 1000));
-  }
-
-  const resetStatements: D1PreparedStatement[] = [
-    db.prepare(`DELETE FROM memos_fts`),
-    db.prepare(`DELETE FROM resources`),
-    db.prepare(`DELETE FROM memo_revisions`),
-    db.prepare(`DELETE FROM memo_contents WHERE memo_id NOT IN (${memoPlaceholders})`).bind(...DEMO_SEED_MEMO_IDS),
-    db.prepare(`DELETE FROM memos WHERE id NOT IN (${memoPlaceholders})`).bind(...DEMO_SEED_MEMO_IDS),
-    db.prepare(`UPDATE notebooks SET parent_id = NULL`),
-    db.prepare(`DELETE FROM notebooks WHERE id NOT IN (${notebookPlaceholders})`).bind(...DEMO_SEED_NOTEBOOK_IDS),
-    db.prepare(`DELETE FROM api_tokens`),
-    db.prepare(`DELETE FROM audit_events`),
-  ];
-
-  if (demoPasswordHash) {
-    resetStatements.push(
-      db.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ? AND is_disabled = 0`)
-        .bind(demoPasswordHash, now, demoUsername),
-      db.prepare(
-        `UPDATE sessions SET revoked_at = ?
-         WHERE user_id IN (SELECT id FROM users WHERE username = ? AND is_disabled = 0)
-           AND revoked_at IS NULL`
-      ).bind(now, demoUsername),
+  try {
+    const demoUsername = env.EDGE_EVER_AUTH_USERNAME?.trim() || "admin";
+    const demoPasswordHash = await resolveDemoPasswordHash(
+      env.EDGE_EVER_AUTH_PASSWORD,
+      env.EDGE_EVER_AUTH_PASSWORD_HASH,
+      hashPassword,
     );
+    const resourceRows = await db.prepare(`SELECT object_key, storage_config_id FROM resources`).all<{ object_key: string; storage_config_id: string }>();
+    await deleteStoredObjects(env, resourceRows.results);
+
+    const resetStatements: D1PreparedStatement[] = [
+      db.prepare(`DELETE FROM mobile_sync_changes`),
+      db.prepare(`DELETE FROM memo_search_documents`),
+      db.prepare(`DELETE FROM resources`),
+      db.prepare(`DELETE FROM memo_revisions`),
+      db.prepare(`DELETE FROM memo_contents`),
+      db.prepare(`DELETE FROM memos`),
+      db.prepare(`UPDATE notebooks SET parent_id = NULL`),
+      db.prepare(`DELETE FROM notebooks`),
+      db.prepare(`DELETE FROM api_tokens`),
+      db.prepare(`DELETE FROM audit_events`),
+    ];
+
+    if (options.resetCredentials && demoPasswordHash) {
+      resetStatements.push(
+        db.prepare(`UPDATE users SET password_hash = ?, updated_at = ? WHERE username = ? AND is_disabled = 0`)
+          .bind(demoPasswordHash, now, demoUsername),
+        db.prepare(
+          `UPDATE sessions SET revoked_at = ?
+           WHERE user_id IN (SELECT id FROM users WHERE username = ? AND is_disabled = 0)
+             AND revoked_at IS NULL`
+        ).bind(now, demoUsername),
+      );
+    }
+
+    await db.batch(resetStatements);
+
+    await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
+    await audit(db, "system", null, "demo.reset", "demo", "edgeever-demo", {
+      scheduledTime: new Date(scheduledTime).toISOString(),
+      seedMemoCount: DEMO_SEED_MEMOS.length,
+    });
+
+    await db.prepare(
+      `UPDATE maintenance_leases SET expires_at = ? WHERE name = 'demo-reset' AND owner_id = ?`,
+    ).bind(new Date(Date.now() + DEMO_RESET_COOLDOWN_MS).toISOString(), leaseOwnerId).run();
+    return true;
+  } catch (error) {
+    await db.prepare(
+      `DELETE FROM maintenance_leases WHERE name = 'demo-reset' AND owner_id = ?`,
+    ).bind(leaseOwnerId).run();
+    throw error;
   }
-
-  await db.batch(resetStatements);
-
-  await ensureDemoSeed(env, { overwriteExisting: true, refreshResources: true });
-  await audit(db, "system", null, "demo.reset", "demo", "edgeever-demo", {
-    scheduledTime: new Date(scheduledTime).toISOString(),
-    seedMemoCount: DEMO_SEED_MEMOS.length,
-  });
 };
 
 const moveMemosToNotebook = async (
@@ -5274,7 +2908,21 @@ const moveMemosToNotebook = async (
   return uniqueMemoIds.length;
 };
 
-const mergeMemosRecord = async (
+const moveMemosRecord = async (
+  db: D1Database,
+  workspaceId: string,
+  memoIds: string[],
+  notebookId: string,
+  actor: AuditActor,
+  actorLabel: string,
+) => {
+  if (!(await getNotebook(db, workspaceId, notebookId))) {
+    throw new AppError("not_found", "Target notebook not found", 404);
+  }
+  return moveMemosToNotebook(db, workspaceId, memoIds, notebookId, actor, actorLabel);
+};
+
+export const mergeMemosRecord = async (
   db: D1Database,
   workspaceId: string,
   input: { memoIds: string[]; notebookId?: string; title?: string },
@@ -5296,12 +2944,39 @@ const mergeMemosRecord = async (
               m.source_memo_ids, m.merge_source_count, m.merged_into_memo_id
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
-       WHERE m.workspace_id = ? AND m.is_deleted = 0 AND m.id IN (${placeholders})`
+       WHERE m.workspace_id = ? AND m.id IN (${placeholders})`
     )
     .bind(workspaceId, ...uniqueMemoIds)
     .all<MemoDetailRow>();
 
   if (rows.results.length !== uniqueMemoIds.length) {
+    throw new AppError("missing_memos", "One or more memos cannot be merged.", 400);
+  }
+
+  const activeRows = rows.results.filter((row) => !row.is_deleted);
+  if (activeRows.length !== uniqueMemoIds.length) {
+    // A desktop outbox retry can arrive after the first merge committed but
+    // before the client acknowledged its local placeholder. When every source
+    // now points at the same live merge result, return that result instead of
+    // treating the retry as a new merge. This makes the operation recoverable
+    // after a lost response without ever creating a second server-side memo.
+    const mergedTargetIds = new Set(
+      rows.results
+        .filter((row) => row.is_deleted && row.merged_into_memo_id)
+        .map((row) => row.merged_into_memo_id as string),
+    );
+    if (activeRows.length === 0 && mergedTargetIds.size === 1) {
+      const [mergedTargetId] = mergedTargetIds;
+      const completedMerge = await getMemoDetail(db, workspaceId, mergedTargetId);
+      const completedSourceIds = new Set(completedMerge?.sourceMemoIds ?? []);
+      if (
+        completedMerge
+        && completedMerge.sourceMemoIds.length === uniqueMemoIds.length
+        && uniqueMemoIds.every((memoId) => completedSourceIds.has(memoId))
+      ) {
+        return completedMerge;
+      }
+    }
     throw new AppError("missing_memos", "One or more memos cannot be merged.", 400);
   }
 
@@ -5314,8 +2989,16 @@ const mergeMemosRecord = async (
     .filter((row): row is MemoDetailRow => Boolean(row));
   const notebookId = input.notebookId ?? ordered[0].notebook_id;
   const title = resolveMergedMemoTitle(input.title, ordered);
-  const mergedMarkdown = ordered.map((memo) => memo.content_markdown).join("\n\n---\n\n");
-  const contentJson = markdownToDoc(mergedMarkdown);
+  const sourceDocs = ordered.map((memo) => {
+    const contentJson = parseDoc(memo.content_json);
+    const doc = resolveMemoContentDoc(contentJson, memo.content_markdown);
+    if (!docToText(doc).trim() && memo.content_text.trim()) {
+      throw new AppError("merge_content_unavailable", "One or more memo bodies could not be recovered safely.", 409);
+    }
+    return doc;
+  });
+  const contentJson = mergeMemoDocs(sourceDocs);
+  const mergedMarkdown = docToMarkdown(contentJson);
   const contentText = docToText(contentJson);
   const tags = Array.from(new Set(ordered.flatMap((memo) => parseJsonArray(memo.tags_json))));
   const excerpt = createExcerpt(contentText || title);
@@ -5352,12 +3035,7 @@ const mergeMemosRecord = async (
         ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
       )
       .bind(newMemoId, JSON.stringify(contentJson), mergedMarkdown, contentText, contentHash, now, now),
-    db
-      .prepare(
-        `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-         VALUES (?, ?, ?, ?)`
-      )
-      .bind(newMemoId, title, contentText, tags.join(" ")),
+    upsertMemoSearchDocumentStatement(db, newMemoId, title, contentText, tags.join(" ")),
     db
       .prepare(
         `UPDATE memos
@@ -5365,7 +3043,8 @@ const mergeMemosRecord = async (
          WHERE workspace_id = ? AND id IN (${placeholders})`
       )
       .bind(now, newMemoId, now, now, workspaceId, ...uniqueMemoIds),
-    db.prepare(`DELETE FROM memos_fts WHERE memo_id IN (${placeholders})`).bind(...uniqueMemoIds),
+    db.prepare(`DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id IN (${placeholders})`).bind(workspaceId, ...uniqueMemoIds),
+    deleteMemoSearchDocumentsStatement(db, uniqueMemoIds),
     db
       .prepare(
         `UPDATE resources
@@ -5423,12 +3102,7 @@ const createMemoRecord = async (
         ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
       )
       .bind(id, JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, createdAt, updatedAt),
-    db
-      .prepare(
-        `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-         VALUES (?, ?, ?, ?)`
-      )
-      .bind(id, title, contentText, tags.join(" ")),
+    upsertMemoSearchDocumentStatement(db, id, title, contentText, tags.join(" ")),
     auditStatement(db, actor.actorType, actor.actorId, "memo.create", "memo", id, {
       notebookId: input.notebookId,
     }),
@@ -5443,25 +3117,203 @@ const createMemoRecord = async (
   return memo;
 };
 
-const updateMemoRecord = async (
+const normalizeImportSource = (value: string) => {
+  const source = value.trim().toLocaleLowerCase("en-US");
+  if (source.length > 80 || !/^[a-z0-9._-]+$/.test(source)) {
+    throw new AppError(
+      "invalid_import_source",
+      "source must contain only letters, numbers, dots, underscores, or hyphens and be at most 80 characters",
+      400,
+    );
+  }
+  return source;
+};
+
+const parseImportDateTime = (value: unknown, field: string) => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !value.trim() || Number.isNaN(Date.parse(value))) {
+    throw new Error(`${field} must be a valid ISO 8601 date-time`);
+  }
+  return value.trim();
+};
+
+const parseMemoImportItem = (value: unknown, index: number) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`items[${index}] must be an object`);
+  }
+
+  const item = value as Record<string, unknown>;
+  const externalId = getRequiredString(item.externalId, `items[${index}].externalId`);
+  if (externalId.length > 512) {
+    throw new Error(`items[${index}].externalId must be at most 512 characters`);
+  }
+  if (item.title !== undefined && typeof item.title !== "string") {
+    throw new Error(`items[${index}].title must be a string`);
+  }
+  const title = typeof item.title === "string" ? item.title.trim() : undefined;
+  if (title && title.length > 160) {
+    throw new Error(`items[${index}].title must be at most 160 characters`);
+  }
+  if (item.contentMarkdown !== undefined && typeof item.contentMarkdown !== "string") {
+    throw new Error(`items[${index}].contentMarkdown must be a string`);
+  }
+  if (item.tags !== undefined && (!Array.isArray(item.tags) || item.tags.some((tag) => typeof tag !== "string"))) {
+    throw new Error(`items[${index}].tags must be an array of strings`);
+  }
+  if (Array.isArray(item.tags) && item.tags.length > 100) {
+    throw new Error(`items[${index}].tags must contain at most 100 items`);
+  }
+
+  return {
+    externalId,
+    title: title || undefined,
+    contentMarkdown: typeof item.contentMarkdown === "string" ? item.contentMarkdown : "",
+    tags: Array.isArray(item.tags) ? (item.tags as string[]) : [],
+    createdAt: parseImportDateTime(item.createdAt, `items[${index}].createdAt`),
+    updatedAt: parseImportDateTime(item.updatedAt, `items[${index}].updatedAt`),
+  };
+};
+
+const getMemoImportSource = async (db: D1Database, workspaceId: string, source: string, externalId: string) =>
+  db.prepare(
+    `SELECT external_id, memo_id, source_updated_at
+     FROM memo_import_sources
+     WHERE workspace_id = ? AND source = ? AND external_id = ?`
+  ).bind(workspaceId, source, externalId).first<MemoImportSourceRow>();
+
+const discardUnlinkedImportedMemo = async (db: D1Database, workspaceId: string, memoId: string) => {
+  await db.batch([
+    db.prepare(`DELETE FROM memo_revisions WHERE memo_id = ?`).bind(memoId),
+    db.prepare(`DELETE FROM memo_contents WHERE memo_id = ?`).bind(memoId),
+    db.prepare(`DELETE FROM memos WHERE id = ? AND workspace_id = ?`).bind(memoId, workspaceId),
+  ]);
+};
+
+const importMemosRecord = async (
+  db: D1Database,
+  workspaceId: string,
+  input: {
+    source: string;
+    notebookId: string;
+    items: unknown;
+    dryRun: boolean;
+    actor: { actorType: "user" | "agent"; actorId: string | null };
+    actorLabel: string;
+  },
+) => {
+  const source = normalizeImportSource(input.source);
+  if (!Array.isArray(input.items) || input.items.length === 0 || input.items.length > 25) {
+    throw new AppError("invalid_import_items", "items must contain between 1 and 25 memos", 400);
+  }
+  const notebook = await getNotebook(db, workspaceId, input.notebookId);
+  if (!notebook) {
+    throw new AppError("not_found", "Import destination notebook not found in the authenticated user's workspace.", 404);
+  }
+
+  const results: Array<Record<string, unknown>> = [];
+
+  for (const [index, rawItem] of input.items.entries()) {
+    let externalId: string | null = null;
+    let createdMemoId: string | null = null;
+
+    try {
+      const item = parseMemoImportItem(rawItem, index);
+      externalId = item.externalId;
+      const existing = await getMemoImportSource(db, workspaceId, source, externalId);
+      if (existing) {
+        results.push({
+          index,
+          externalId,
+          status: "skipped",
+          reason: "already_imported",
+          memo: await getMemoDetail(db, workspaceId, existing.memo_id, true),
+          sourceUpdatedAt: existing.source_updated_at,
+        });
+        continue;
+      }
+
+      if (input.dryRun) {
+        results.push({ index, externalId, status: "would_create" });
+        continue;
+      }
+
+      const memo = await createMemoRecord(db, workspaceId, {
+        notebookId: notebook.id,
+        title: item.title,
+        contentMarkdown: item.contentMarkdown,
+        tags: item.tags,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      }, input.actor, input.actorLabel);
+      createdMemoId = memo.id;
+      const now = isoNow();
+      await db.batch([
+        db.prepare(
+          `INSERT INTO memo_import_sources (
+             workspace_id, source, external_id, memo_id, source_updated_at, content_hash, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(workspaceId, source, externalId, memo.id, item.updatedAt ?? null, memo.contentHash, now, now),
+        auditStatement(db, input.actor.actorType, input.actor.actorId, "memo.import", "memo", memo.id, {
+          source,
+          externalId,
+          notebookId: notebook.id,
+        }),
+      ]);
+      results.push({ index, externalId, status: "created", memo });
+    } catch (error) {
+      if (createdMemoId) {
+        await discardUnlinkedImportedMemo(db, workspaceId, createdMemoId);
+        const winner = externalId ? await getMemoImportSource(db, workspaceId, source, externalId) : null;
+        if (winner) {
+          results.push({
+            index,
+            externalId,
+            status: "skipped",
+            reason: "already_imported",
+            memo: await getMemoDetail(db, workspaceId, winner.memo_id, true),
+            sourceUpdatedAt: winner.source_updated_at,
+          });
+          continue;
+        }
+      }
+
+      results.push({
+        index,
+        externalId,
+        status: "failed",
+        error: error instanceof Error ? error.message : "Import failed",
+      });
+    }
+  }
+
+  const count = (status: string) => results.filter((result) => result.status === status).length;
+  return {
+    dryRun: input.dryRun,
+    source,
+    notebookId: notebook.id,
+    total: results.length,
+    created: count("created"),
+    skipped: count("skipped"),
+    failed: count("failed"),
+    wouldCreate: count("would_create"),
+    results,
+  };
+};
+
+export const updateMemoRecord = async (
   db: D1Database,
   workspaceId: string,
   id: string,
-  input: {
-    expectedRevision?: number;
-    notebookId?: string;
-    title?: string;
-    isPinned?: boolean;
-    contentJson?: TiptapDoc;
-    contentMarkdown?: string;
-    tags?: string[];
-    createdAt?: string;
-    updatedAt?: string;
-    allowDestructiveOverwrite?: boolean;
-  },
+  input: MemoUpdateInput,
   actor: { actorType: "user" | "agent"; actorId: string | null },
-  actorLabel: string
-): Promise<{ memo: MemoDetail; error?: never; message?: never } | { error: string; message: string }> => {
+  actorLabel: string,
+  requireEditSession = false,
+): Promise<
+  | { memo: MemoDetail; error?: never; message?: never; status?: never; details?: never }
+  | { error: string; message: string; status?: number; details?: Record<string, unknown> }
+> => {
   const current = await getMemoDetailRow(db, workspaceId, id);
 
   if (!current) {
@@ -5469,7 +3321,69 @@ const updateMemoRecord = async (
   }
 
   if (input.expectedRevision !== undefined && input.expectedRevision !== current.revision) {
-    return { error: "revision_conflict", message: "Memo was updated elsewhere. Reload before saving." };
+    return {
+      error: "revision_conflict",
+      message: "Memo was updated elsewhere. Reload before saving.",
+      status: 409,
+      details: {
+        expectedRevision: input.expectedRevision,
+        currentRevision: current.revision,
+      },
+    };
+  }
+
+  const hasDocumentUpdate = input.contentJson !== undefined || input.contentMarkdown !== undefined;
+  let editSession: MemoEditSessionRow | null = null;
+
+  if (requireEditSession && hasDocumentUpdate) {
+    if (!input.editSessionId || !input.expectedContentHash || input.expectedRevision === undefined) {
+      return {
+        error: "edit_session_required",
+        message: "A bound edit session is required to save note content.",
+        status: 428,
+      };
+    }
+
+    if (input.expectedContentHash !== current.content_hash) {
+      return {
+        error: "content_conflict",
+        message: "Note content changed after this edit session started.",
+        status: 409,
+      };
+    }
+
+    editSession = await db.prepare(
+      `SELECT id, memo_id, actor_type, actor_id, base_revision, base_content_hash, expires_at
+       FROM memo_edit_sessions
+       WHERE id = ? AND memo_id = ? AND actor_type = ? AND actor_id IS ? AND expires_at > ?`,
+    )
+      .bind(input.editSessionId, id, actor.actorType, actor.actorId, isoNow())
+      .first<MemoEditSessionRow>();
+
+    if (
+      !editSession ||
+      !isMemoEditBindingValid(
+        { memoId: id, revision: current.revision, contentHash: current.content_hash },
+        {
+          id: editSession.id,
+          memoId: editSession.memo_id,
+          baseRevision: editSession.base_revision,
+          baseContentHash: editSession.base_content_hash,
+        },
+        {
+          editSessionId: input.editSessionId,
+          memoId: id,
+          expectedRevision: input.expectedRevision,
+          expectedContentHash: input.expectedContentHash,
+        },
+      )
+    ) {
+      return {
+        error: "edit_session_conflict",
+        message: "The edit session is stale or belongs to another note.",
+        status: 409,
+      };
+    }
   }
 
   const isPinned = input.isPinned ?? Boolean(current.is_pinned);
@@ -5523,8 +3437,12 @@ const updateMemoRecord = async (
         ? markdownToDoc(input.contentMarkdown)
         : currentContentJson;
   const contentMarkdown =
-    input.contentMarkdown !== undefined ? input.contentMarkdown : docToMarkdown(contentJson);
-  const contentText = docToText(contentJson);
+    input.contentMarkdown !== undefined
+      ? input.contentMarkdown
+      : input.contentJson !== undefined
+        ? docToMarkdown(contentJson)
+        : current.content_markdown;
+  const contentText = hasDocumentUpdate ? docToText(contentJson) : current.content_text;
   const title =
     input.title !== undefined ? normalizeMemoTitle(input.title) : normalizeMemoTitle(current.title);
   if (
@@ -5539,11 +3457,52 @@ const updateMemoRecord = async (
   const tags = input.tags === undefined ? parseJsonArray(current.tags_json) : normalizeTags(input.tags);
   const excerpt = createExcerpt(contentText);
   const notebookId = input.notebookId ?? current.notebook_id;
-  const nextRevision = current.revision + 1;
   const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
+  const unchanged =
+    notebookId === current.notebook_id
+    && title === normalizeMemoTitle(current.title)
+    && JSON.stringify(tags) === current.tags_json
+    && isPinned === Boolean(current.is_pinned)
+    && contentHash === current.content_hash
+    && input.createdAt === undefined
+    && input.updatedAt === undefined;
+
+  if (unchanged) {
+    return { memo: mapMemoDetail(current) };
+  }
+
+  const nextRevision = current.revision + 1;
   const revisionStatements = (await shouldSnapshotMemoRevision(db, current, title, JSON.stringify(tags), contentHash, updatedAt))
     ? [createMemoRevisionStatement(db, current, actorLabel, updatedAt)]
     : [];
+  const editSessionStatements = editSession
+    ? [
+        db.prepare(
+          `UPDATE memo_edit_sessions
+           SET base_revision = ?, base_content_hash = ?, updated_at = ?
+           WHERE id = ? AND memo_id = ? AND base_revision = ? AND base_content_hash = ?`,
+        ).bind(nextRevision, contentHash, updatedAt, editSession.id, id, current.revision, current.content_hash),
+      ]
+    : requireEditSession
+      ? [
+          db.prepare(
+            `UPDATE memo_edit_sessions
+             SET base_revision = ?, base_content_hash = ?, updated_at = ?
+             WHERE memo_id = ? AND actor_type = ? AND actor_id IS ?
+               AND base_revision = ? AND base_content_hash = ? AND expires_at > ?`,
+          ).bind(
+            nextRevision,
+            contentHash,
+            updatedAt,
+            id,
+            actor.actorType,
+            actor.actorId,
+            current.revision,
+            current.content_hash,
+            updatedAt,
+          ),
+        ]
+      : [];
 
   await db.batch([
     ...revisionStatements,
@@ -5563,13 +3522,8 @@ const updateMemoRecord = async (
          WHERE memo_id = ?`
       )
       .bind(JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, nextRevision, updatedAt, input.createdAt ?? null, id),
-    db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(id),
-    db
-      .prepare(
-        `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-         VALUES (?, ?, ?, ?)`
-      )
-      .bind(id, title, contentText, tags.join(" ")),
+    upsertMemoSearchDocumentStatement(db, id, title, contentText, tags.join(" ")),
+    ...editSessionStatements,
     auditStatement(db, actor.actorType, actor.actorId, "memo.update", "memo", id, {
       revision: nextRevision,
     }),
@@ -5601,8 +3555,14 @@ const getMemoRevisionRow = async (
     .bind(revisionId, memoId, workspaceId)
     .first<MemoRevisionRow>();
 
-const listMemoRevisions = async (db: D1Database, workspaceId: string, memoId: string, limit: number): Promise<MemoRevision[]> => {
-  const memo = await getMemoDetail(db, workspaceId, memoId, true);
+const listMemoRevisions = async (
+  db: D1Database,
+  workspaceId: string,
+  memoId: string,
+  limit: number,
+  includeDeleted = true,
+): Promise<MemoRevision[]> => {
+  const memo = await getMemoDetail(db, workspaceId, memoId, includeDeleted);
 
   if (!memo) {
     throw new AppError("not_found", "Memo not found", 404);
@@ -5670,13 +3630,7 @@ const restoreMemoRevisionRecord = async (
          WHERE memo_id = ?`
       )
       .bind(JSON.stringify(contentJson), contentMarkdown, contentText, contentHash, nextRevision, now, memoId),
-    db.prepare(`DELETE FROM memos_fts WHERE memo_id = ?`).bind(memoId),
-    db
-      .prepare(
-        `INSERT INTO memos_fts (memo_id, title, content_text, tags)
-         VALUES (?, ?, ?, ?)`
-      )
-      .bind(memoId, title, contentText, tags.join(" ")),
+    upsertMemoSearchDocumentStatement(db, memoId, title, contentText, tags.join(" ")),
     auditStatement(db, actor.actorType, actor.actorId, "memo.revision_restore", "memo", memoId, {
       revisionId,
       restoredRevision: revision.revision,
@@ -5771,7 +3725,7 @@ const shouldSnapshotMemoRevision = async (
 const getResourceRow = async (db: D1Database, workspaceId: string, id: string): Promise<ResourceRow | null> =>
   db
     .prepare(
-      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.kind, r.mime_type,
+      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.storage_config_id, r.kind, r.mime_type,
               r.filename, r.byte_size, r.sha256, r.width, r.height, r.created_at, r.updated_at
        FROM resources r
        INNER JOIN memos m ON m.id = r.memo_id
@@ -5783,7 +3737,7 @@ const getResourceRow = async (db: D1Database, workspaceId: string, id: string): 
 const getResourceRowsForMemo = async (db: D1Database, workspaceId: string, memoId: string): Promise<ResourceRow[]> => {
   const rows = await db
     .prepare(
-      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.kind, r.mime_type,
+      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.storage_config_id, r.kind, r.mime_type,
               r.filename, r.byte_size, r.sha256, r.width, r.height, r.created_at, r.updated_at
        FROM resources r
        INNER JOIN memos m ON m.id = r.memo_id
@@ -5798,8 +3752,8 @@ const getResourceRowsForMemo = async (db: D1Database, workspaceId: string, memoI
 const listResourcesForMemo = async (db: D1Database, workspaceId: string, memoId: string): Promise<Resource[]> => {
   const rows = await db
     .prepare(
-      `SELECT id, memo_id, original_memo_id, bucket_name, object_key, kind, mime_type,
-              filename, byte_size, sha256, width, height, created_at, updated_at
+      `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.storage_config_id, r.kind, r.mime_type,
+              r.filename, r.byte_size, r.sha256, r.width, r.height, r.created_at, r.updated_at
        FROM resources r
        INNER JOIN memos m ON m.id = r.memo_id
        WHERE r.memo_id = ? AND m.workspace_id = ? AND r.is_deleted = 0
@@ -5815,7 +3769,7 @@ const listResourcesForMcp = async (db: D1Database, workspaceId: string, limit: n
   const [rows, stats] = await Promise.all([
     db
       .prepare(
-        `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.kind,
+        `SELECT r.id, r.memo_id, r.original_memo_id, r.bucket_name, r.object_key, r.storage_config_id, r.kind,
                 r.mime_type, r.filename, r.byte_size, r.sha256, r.width, r.height,
                 r.created_at, r.updated_at, m.title AS memo_title, m.excerpt AS memo_excerpt,
                 m.is_deleted AS memo_is_deleted
@@ -5862,9 +3816,10 @@ const getWorkspaceStats = async (db: D1Database, workspaceId: string) => {
     db.prepare(`SELECT COUNT(*) AS count FROM notebooks WHERE workspace_id = ? AND is_deleted = 0`).bind(workspaceId).first<{ count: number }>(),
     db
       .prepare(
-        `SELECT COUNT(DISTINCT json_each.value) AS count
-         FROM memos m, json_each(m.tags_json)
-         WHERE m.workspace_id = ? AND m.is_deleted = 0 AND trim(json_each.value) <> ''`
+        `SELECT COUNT(DISTINCT mt.name) AS count
+         FROM memo_tags mt
+         INNER JOIN memos m ON m.id = mt.memo_id AND m.workspace_id = mt.workspace_id
+         WHERE mt.workspace_id = ? AND m.is_deleted = 0`
       )
       .bind(workspaceId).first<{ count: number }>(),
     db
@@ -5898,15 +3853,6 @@ const getWorkspaceStats = async (db: D1Database, workspaceId: string) => {
   };
 };
 
-const parseJsonArray = (json: string): string[] => {
-  try {
-    const value = JSON.parse(json);
-    return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-};
-
 const parseDoc = (json: string): TiptapDoc => {
   try {
     const value = JSON.parse(json);
@@ -5916,70 +3862,10 @@ const parseDoc = (json: string): TiptapDoc => {
   }
 };
 
-const audit = async (
-  db: D1Database,
-  actorType: "user" | "agent" | "system",
-  actorId: string | null,
-  action: string,
-  entityType: string,
-  entityId: string,
-  metadata: unknown
-) => auditStatement(db, actorType, actorId, action, entityType, entityId, metadata).run();
-
-const auditStatement = (
-  db: D1Database,
-  actorType: "user" | "agent" | "system",
-  actorId: string | null,
-  action: string,
-  entityType: string,
-  entityId: string,
-  metadata: unknown
-) =>
-  db
-    .prepare(
-      `INSERT INTO audit_events (
-        id, actor_type, actor_id, action, entity_type, entity_id, metadata_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .bind(createId("audit"), actorType, actorId, action, entityType, entityId, JSON.stringify(metadata ?? {}), isoNow());
-
-const createId = (prefix: string) => `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
-
-const isoNow = () => new Date().toISOString();
-
-const slugify = (value: string) =>
-  value
-    .trim()
-    .toLowerCase()
-    .replace(/['"]/g, "")
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-
 const normalizeMemoTitle = (value: string | null | undefined) => {
   const title = value?.trim();
   return title || DEFAULT_MEMO_TITLE;
 };
-
-const isCustomMemoTitle = (value: string | null | undefined) => {
-  const title = value?.trim();
-  return Boolean(title && title !== DEFAULT_MEMO_TITLE);
-};
-
-const resolveMergedMemoTitle = (inputTitle: string | undefined, sourceMemos: Array<{ title: string | null }>) => {
-  const title = inputTitle?.trim();
-  if (title) {
-    return title;
-  }
-
-  return sourceMemos.find((memo) => isCustomMemoTitle(memo.title))?.title?.trim() ?? `合并笔记 ${new Date().toLocaleDateString("zh-CN")}`;
-};
-
-const normalizeMemoListSort = (value: string | undefined): MemoListSortMode =>
-  value === "created-desc" || value === "title-asc" ? value : "updated-desc";
-
-const normalizeMemoListFilter = (value: string | undefined): MemoListFilterMode =>
-  value === "tagged" || value === "untagged" || value === "pinned" ? value : "all";
 
 const clampNumber = (value: number, min: number, max: number) => {
   if (Number.isNaN(value)) {
@@ -5988,69 +3874,6 @@ const clampNumber = (value: number, min: number, max: number) => {
 
   return Math.min(Math.max(value, min), max);
 };
-
-const encodeMemoListCursor = (memo: MemoSummaryRow, sort: MemoListSortMode, includeTrash: boolean) => {
-  const cursor: MemoListCursor = {
-    sort,
-    id: memo.id,
-  };
-
-  if (includeTrash) {
-    cursor.deletedAt = memo.deleted_at;
-  } else {
-    cursor.pinned = memo.is_pinned;
-  }
-
-  if (sort === "created-desc") {
-    cursor.createdAt = memo.created_at;
-  } else if (sort === "title-asc") {
-    cursor.title = normalizeMemoTitle(memo.title).toLocaleLowerCase();
-    cursor.updatedAt = memo.updated_at;
-  } else {
-    cursor.updatedAt = memo.updated_at;
-  }
-
-  const bytes = new TextEncoder().encode(JSON.stringify(cursor));
-  let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-};
-
-const decodeMemoListCursor = (value: string | undefined, sort: MemoListSortMode): MemoListCursor | null => {
-  if (!value) {
-    return null;
-  }
-
-  try {
-    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const binary = atob(padded);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const cursor = JSON.parse(new TextDecoder().decode(bytes)) as Partial<MemoListCursor>;
-
-    if (cursor.sort !== sort || typeof cursor.id !== "string") {
-      return null;
-    }
-
-    return cursor as MemoListCursor;
-  } catch {
-    return null;
-  }
-};
-
-const toFtsQuery = (value: string) => {
-  const tokens = value.match(/[\p{L}\p{N}_]+/gu) ?? [];
-  return tokens
-    .slice(0, 8)
-    .map((token) => `"${token.replace(/"/g, '""')}"`)
-    .join(" ");
-};
-
-const escapeLike = (value: string) => value.replace(/[\\%_]/g, (character) => `\\${character}`);
 
 const sha256 = async (value: string) => {
   const bytes = new TextEncoder().encode(value);
@@ -6067,116 +3890,3 @@ const sha256Bytes = async (bytes: Uint8Array) => {
   }
   return hexString;
 };
-
-const inferImageExtension = (filename: string, mimeType: string) => {
-  const extension = /\.(png|jpe?g|gif|webp|avif)$/i.exec(filename)?.[0]?.toLowerCase();
-
-  if (extension) {
-    return extension === ".jpeg" ? ".jpg" : extension;
-  }
-
-  switch (mimeType) {
-    case "image/png":
-      return ".png";
-    case "image/jpeg":
-      return ".jpg";
-    case "image/gif":
-      return ".gif";
-    case "image/webp":
-      return ".webp";
-    case "image/avif":
-      return ".avif";
-    default:
-      return "";
-  }
-};
-
-const normalizeFilename = (filename: string) =>
-  filename
-    .trim()
-    .replace(/[\\/]/g, "-")
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .slice(0, 160);
-
-const contentDispositionInline = (filename: string | null) => {
-  if (!filename) {
-    return "inline";
-  }
-
-  const fallback = normalizeFilename(filename).replace(/"/g, "'");
-  return `inline; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
-};
-
-const decodeTagParam = (value: string) => {
-  try {
-    return decodeURIComponent(value).trim();
-  } catch {
-    return value.trim();
-  }
-};
-
-const notFound = (c: Context, message: string) =>
-  c.json(
-    {
-      error: {
-        code: "not_found",
-        message,
-      },
-    },
-    404
-  );
-
-const badRequest = (c: Context, message: string) =>
-  c.json(
-    {
-      error: {
-        code: "bad_request",
-        message,
-      },
-    },
-    400
-  );
-
-const apiError = (c: Context, code: string, message: string, status: number) =>
-  c.json(
-    {
-      error: {
-        code,
-        message,
-      },
-    },
-    status as 400
-  );
-
-const conflict = (c: Context, code: string, message: string) =>
-  c.json(
-    {
-      error: {
-        code,
-        message,
-      },
-    },
-    409
-  );
-
-const unauthorized = (c: Context, message: string) =>
-  c.json(
-    {
-      error: {
-        code: "unauthorized",
-        message,
-      },
-    },
-    401
-  );
-
-const forbidden = (c: Context, message: string) =>
-  c.json(
-    {
-      error: {
-        code: "forbidden",
-        message,
-      },
-    },
-    403
-  );

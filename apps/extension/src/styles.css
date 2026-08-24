@@ -18,6 +18,86 @@ body {
 
 .popup-shell {
   width: 320px;
+  padding: 20px;
+  background: #f8fafc;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.popup-header img {
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 12%);
+}
+
+.popup-header h1 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.popup-header .hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.popup-description {
+  margin: 18px 0 14px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.save-button {
+  display: inline-flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  box-shadow: 0 1px 2px rgb(15 118 110 / 18%);
+}
+
+.save-button svg,
+.settings-button svg {
+  fill: none;
+  stroke: currentcolor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.popup-shell .status:empty {
+  display: none;
+}
+
+.popup-shell .status {
+  min-height: 0;
+  margin: 12px 0 0;
+}
+
+.settings-button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 16px;
+  border-top: 1px solid #e2e8f0;
+  border-radius: 0;
+  background: transparent;
+  color: #0f766e;
+  padding: 15px 0 0;
+  font-size: 13px;
+}
+
+.settings-button:hover {
+  background: transparent;
+  color: #115e59;
 }
 
 .options-shell {
@@ -27,6 +107,61 @@ body {
 h1 {
   margin: 0 0 8px;
   font-size: 22px;
+}
+
+.diagnostics-panel {
+  margin-top: 28px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 22px;
+}
+
+.diagnostics-panel h2 {
+  margin: 0 0 8px;
+  font-size: 17px;
+}
+
+.diagnostics-list {
+  margin: 16px 0 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: white;
+  overflow: hidden;
+}
+
+.diagnostics-list div {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 12px;
+}
+
+.diagnostics-list div:last-child {
+  border-bottom: 0;
+}
+
+.diagnostics-list dt {
+  color: #64748b;
+}
+
+.diagnostics-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #172033;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.diagnostics-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.diagnostics-actions .status {
+  min-height: 0;
+  margin: 0;
 }
 
 .hint {
@@ -115,4 +250,20 @@ button:disabled {
 
 .status[data-kind="success"] {
   color: #047857;
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 20px 0 0;
+  font-size: 12px;
+}
+
+.about-links a {
+  color: #0f766e;
+}
+
+.about-links span {
+  color: #94a3b8;
 }
