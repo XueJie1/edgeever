@@ -9,9 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import type { EdgeEverPluginHost, InstalledExtension, RegisteredPluginCommand, RegisteredPluginPanel } from "@/lib/plugins/plugin-host";
 import { PluginPanelDialog } from "@/components/plugins/PluginPanelDialog";
-import { loadPluginMarketplace } from "@/lib/plugins/plugin-marketplace";
-import { GitHubMark } from "@/components/GitHubRepositoryLink";
-import { checkPluginUpdates, type PluginUpdateInfo } from "@/lib/plugins/plugin-updates";
+import { loadResolvedPluginMarketplace } from "@/lib/plugins/plugin-marketplace";
+import { GitHubMark, GitHubRepositoryLink } from "@/components/GitHubRepositoryLink";
+import { applyPluginUpdate, checkPluginUpdates, type PluginUpdateInfo } from "@/lib/plugins/plugin-updates";
 import { PluginUpdateDialog } from "@/components/plugins/PluginUpdateDialog";
 import { PluginSettingsSection } from "@/components/plugins/PluginSettingsSection";
 import { getPluginDetailPage, getPluginDetailPath, hasPluginSettings, type PluginDetailPage } from "@/lib/plugins/plugin-navigation";
@@ -27,6 +27,7 @@ import {
 } from "@/lib/plugins/plugin-trust";
 
 const permissionLabel = (permission: string) => permission.replace(":", " · ");
+const PLUGIN_CARD_GRID_CLASS_NAME = "grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3";
 
 const LegacyManualScheduledTasksSection = () => {
   const { t } = useTranslation();
@@ -309,7 +310,7 @@ export const PluginManagerCard = ({
   const [activePanel, setActivePanel] = useState<RegisteredPluginPanel | null>(null);
   const [pendingUpdate, setPendingUpdate] = useState<PluginUpdateInfo | null>(null);
   const [pendingTrustPluginId, setPendingTrustPluginId] = useState<string | null>(null);
-  const marketplaceQuery = useQuery({ queryKey: ["plugin-marketplace", "v1"], queryFn: () => loadPluginMarketplace(), staleTime: 5 * 60_000 });
+  const marketplaceQuery = useQuery({ queryKey: ["plugin-marketplace", "v1"], queryFn: () => loadResolvedPluginMarketplace(), staleTime: 5 * 60_000 });
   const extensionVersionKey = snapshot.extensions
     .map((extension) => `${extension.manifest.id}:${extension.manifest.version}:${extension.source.kind}`)
     .join("|");
@@ -373,8 +374,11 @@ export const PluginManagerCard = ({
         ["plugin-updates", extensionVersionKey, refreshedMarketplace.data?.updatedAt ?? "unavailable"],
         result,
       );
-      setLastManualCheckCount(result.updates.length);
-      const firstCheckError = Object.values(result.errors)[0];
+      const firstCheckError = Object.values({
+        ...(refreshedMarketplace.data?.resolutionErrors ?? {}),
+        ...result.errors,
+      })[0];
+      setLastManualCheckCount(firstCheckError ? null : result.updates.length);
       if (firstCheckError) setError(t("plugins.updates.checkFailed", { message: firstCheckError }));
     } catch (checkError) {
       setError(checkError instanceof Error ? checkError.message : String(checkError));
@@ -404,17 +408,7 @@ export const PluginManagerCard = ({
   };
 
   const applyUpdate = async (update: PluginUpdateInfo) => {
-    const extension = snapshot.extensions.find((candidate) => candidate.manifest.id === update.pluginId);
-    if (!extension) throw new Error("Extension is no longer installed.");
-    if (extension.source.kind === "marketplace") {
-      if (!update.marketplaceEntry) throw new Error("The verified marketplace entry is no longer available.");
-      await host.installMarketplaceEntry(update.marketplaceEntry, update.latestManifest);
-    } else if (extension.source.kind === "github") {
-      if (!extension.source.repositoryUrl) throw new Error("Installed GitHub extension is missing its repository URL.");
-      await host.installFromGithubRepository(extension.source.repositoryUrl, undefined, update.latestManifest);
-    } else {
-      await host.installFromManifestUrl(extension.manifestUrl, undefined, update.latestManifest);
-    }
+    await applyPluginUpdate(host, update);
     setPendingUpdate(null);
     setLastManualCheckCount(null);
     await updateQuery.refetch();
@@ -432,7 +426,7 @@ export const PluginManagerCard = ({
             </span>
           </CardTitle>
           <div className="flex items-center gap-1">
-            {snapshot.extensions.length > 0 ? (
+            {snapshot.extensions.length > 0 || (marketplaceQuery.data?.entries.length ?? 0) > 0 ? (
               <Button
                 variant="ghost"
                 size="sm"
@@ -504,7 +498,7 @@ export const PluginManagerCard = ({
         ) : (
           <>
         {(marketplaceQuery.data?.entries.length ?? 0) > 0 ? (
-          <div className="grid gap-2 md:grid-cols-2">
+          <div className={PLUGIN_CARD_GRID_CLASS_NAME}>
             {(marketplaceQuery.data?.entries ?? []).map((entry) => {
               const installed = snapshot.extensions.find((extension) => extension.manifest.id === entry.id);
               const currentVerified = installed?.source.verified && installed.manifest.version === entry.verification.version;
@@ -517,18 +511,21 @@ export const PluginManagerCard = ({
                         <div className="flex items-center gap-1.5">
                           <span className="truncate text-sm font-semibold text-slate-900">{entry.name}</span>
                           <BadgeCheck className="h-4 w-4 shrink-0 text-emerald-600" aria-label={t("plugins.marketplace.verified")} />
+                          {entry.publisher === "edgeever" ? (
+                            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700">
+                              {t("plugins.marketplace.officialAutoUpdate")}
+                            </span>
+                          ) : null}
                         </div>
                         <div className="mt-0.5 text-[10px] text-slate-400">{entry.author} · {entry.category} · v{entry.verification.version}</div>
                       </div>
-                      <a
+                      <GitHubRepositoryLink
                         href={entry.repositoryUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
-                        aria-label={t("plugins.marketplace.openRepository", { name: entry.name })}
-                      >
-                        <ExternalLink className="h-3.5 w-3.5" />
-                      </a>
+                        label={t("plugins.marketplace.openRepository", { name: entry.name })}
+                        showTooltip={false}
+                        className="h-7 w-7 shrink-0 justify-center rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
+                        iconClassName="h-3.5 w-3.5"
+                      />
                     </div>
                     <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">{entry.description}</p>
                     <Button
@@ -579,7 +576,7 @@ export const PluginManagerCard = ({
             {t("plugins.empty")}
           </div>
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <div className={PLUGIN_CARD_GRID_CLASS_NAME}>
             {snapshot.extensions.map((extension) => {
               const id = extension.manifest.id;
               const availableUpdate = updateQuery.data?.updates.find((update) => update.pluginId === id);
@@ -622,19 +619,24 @@ export const PluginManagerCard = ({
                         </span>
                       </div>
                       {extension.manifest.description ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{extension.manifest.description}</p> : null}
-                      {extension.source.repositoryUrl ? (
-                        <a className="mt-1 flex max-w-full items-center gap-1 text-[11px] text-slate-400 hover:text-emerald-700" href={extension.source.repositoryUrl} target="_blank" rel="noreferrer">
-                          <GitHubMark className="h-3 w-3 shrink-0" />
-                          <span className="truncate">{extension.source.repositoryUrl.replace("https://github.com/", "")}</span>
-                        </a>
-                      ) : null}
                     </div>
-                    <Switch
-                      aria-label={t("plugins.toggle", { name: extension.manifest.name })}
-                      checked={extension.enabled}
-                      disabled={pendingId === id}
-                      onCheckedChange={(enabled) => toggleExtension(extension, enabled)}
-                    />
+                    <div className="flex shrink-0 items-center gap-1">
+                      {extension.source.repositoryUrl ? (
+                        <GitHubRepositoryLink
+                          href={extension.source.repositoryUrl}
+                          label={t("plugins.marketplace.openRepository", { name: extension.manifest.name })}
+                          showTooltip={false}
+                          className="h-7 w-7 justify-center rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/70"
+                          iconClassName="h-3.5 w-3.5"
+                        />
+                      ) : null}
+                      <Switch
+                        aria-label={t("plugins.toggle", { name: extension.manifest.name })}
+                        checked={extension.enabled}
+                        disabled={pendingId === id}
+                        onCheckedChange={(enabled) => toggleExtension(extension, enabled)}
+                      />
+                    </div>
                   </div>
 
                   {extension.manifest.type === "plugin" && extension.manifest.permissions.length > 0 ? (
